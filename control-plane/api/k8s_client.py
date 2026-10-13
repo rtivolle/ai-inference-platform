@@ -246,11 +246,23 @@ class K8sClient:
         async with client.ApiClient() as api:
             batch_api = client.BatchV1Api(api)
             try:
-                await batch_api.delete_namespaced_job(name=name, namespace=namespace, propagation_policy="Background")
-                await asyncio.sleep(1)
+                await batch_api.delete_namespaced_job(name=name, namespace=namespace, propagation_policy="Foreground")
             except ApiException as exc:
                 if exc.status != 404:
                     raise
+            else:
+                # Wait for the previous Job and its pods to disappear before reusing
+                # the name; a fixed sleep races the API's asynchronous deletion.
+                for _ in range(60):
+                    try:
+                        await batch_api.read_namespaced_job(name=name, namespace=namespace)
+                    except ApiException as exc:
+                        if exc.status == 404:
+                            break
+                        raise
+                    await asyncio.sleep(1)
+                else:
+                    raise TimeoutError(f"Previous warmer Job {name} did not finish deletion.")
             res = await batch_api.create_namespaced_job(namespace=namespace, body=manifest_dict)  # type: ignore[arg-type]
             return res
 

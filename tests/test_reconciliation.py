@@ -235,3 +235,32 @@ async def test_gpu_node_selection_filters_readiness_sku_and_capacity(monkeypatch
     k8s = live_client(monkeypatch, "CoreV1Api", api)
     assert await k8s.get_target_gpu_nodes(plan) == ["gpu-a", "gpu-b"]
     assert await k8s.get_target_gpu_nodes({**plan, "target_node": "gpu-b"}) == ["gpu-b"]
+
+
+@pytest.mark.asyncio
+async def test_replacing_warmer_waits_for_deletion(monkeypatch):
+    api = AsyncMock()
+    api.read_namespaced_job.side_effect = [object(), ApiException(status=404)]
+    k8s = live_client(monkeypatch, "BatchV1Api", api)
+    monkeypatch.setattr(k8s_module.asyncio, "sleep", AsyncMock())
+    await k8s.apply_job({"metadata": {"name": "test"}})
+    assert api.read_namespaced_job.await_count == 2
+    assert api.delete_namespaced_job.await_args.kwargs["propagation_policy"] == "Foreground"
+    api.create_namespaced_job.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_forbidden_warmer_deletion_blocks_replacement(monkeypatch):
+    api = AsyncMock()
+    api.delete_namespaced_job.side_effect = ApiException(status=403)
+    k8s = live_client(monkeypatch, "BatchV1Api", api)
+    with pytest.raises(ApiException):
+        await k8s.apply_job({"metadata": {"name": "test"}})
+    api.create_namespaced_job.assert_not_awaited()
+
+
+def test_warmer_job_names_distinguish_long_deployment_names(reconciler, plan):
+    names = [reconciler.render_warmer_job({
+        **plan, "deployment_name": "a" * 60 + suffix, "target_node": "gpu-a",
+    })["metadata"]["name"] for suffix in ("-b", "-c")]
+    assert names[0] != names[1]

@@ -93,7 +93,8 @@ class DynamoReconciler:
         template = self.jinja_env.get_template("warmer-job.yaml.j2")
         context = {**plan, "namespace": namespace}
         node = plan.get("target_node", "")
-        suffix = f"-{hashlib.sha256(node.encode()).hexdigest()[:10]}" if node else ""
+        identity = f"{plan['deployment_name']}:{node}"
+        suffix = f"-{hashlib.sha256(identity.encode()).hexdigest()[:10]}" if node else ""
         context["warmer_job_name"] = f"{plan['deployment_name'][:45]}-warmer{suffix}"
         if os.environ.get("MODEL_WARMER_IMAGE"):
             context["warmer_image"] = os.environ["MODEL_WARMER_IMAGE"]
