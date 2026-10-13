@@ -1,0 +1,40 @@
+# NVIDIA GPU Operator Helm Values for AI Inference Platform
+operator:
+  defaultRuntime: containerd
+
+driver:
+  enabled: true
+  useOpenKernelModules: true
+
+toolkit:
+  enabled: true
+
+dcgmExporter:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+    interval: 5s
+
+gdrdrv:
+  enabled: true # GPUDirect RDMA driver support
+
+devicePlugin:
+  enabled: true
+  config:
+    create: true
+    name: "gpu-sharing-config"
+    default: "default"
+    data:
+      default: |-
+        version: v1
+        flags:
+          migStrategy: "none"
+
+mig:
+  strategy: none
+
+validator:
+  plugin:
+    env:
+      - name: WITH_WORKLOAD
+        value: "true"

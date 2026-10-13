@@ -1,0 +1,16 @@
+model_list: []
+
+litellm_settings:
+  drop_params: true
+  set_verbose: false
+  telemetry: false
+  request_timeout: 600
+
+general_settings:
+  master_key: "internal-master-key"
+  database_url: "postgresql://litellm:litellm_secret@postgres-service.ai-gateway.svc.cluster.local:5432/litellm"
+  # redis_url: "redis://redis-service.ai-gateway.svc.cluster.local:6379/0"
+
+router_settings:
+  routing_strategy: "least-busy"
+  model_group_alias: {}

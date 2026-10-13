@@ -1,0 +1,50 @@
+name: CI Quality Gate
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  validate-contracts-and-scripts:
+    name: Contracts & Shell Validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install jsonschema pyyaml pytest shellcheck-py
+
+      - name: Run shellcheck on scripts
+        run: |
+          shellcheck scripts/*.sh
+
+      - name: Validate JSON schemas and OpenAPI
+        run: |
+          python -c "import jsonschema, json; [json.load(open(f)) for f in ['contracts/model_spec.schema.json', 'contracts/dynamo_crd.schema.json']]"
+
+  unit-and-e2e-tests:
+    name: Unit & E2E Validation Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install test dependencies
+        run: |
+          pip install pytest jinja2 jsonschema pydantic fastapi httpx pyyaml kubernetes_asyncio
+
+      - name: Run Pytest Suite
+        run: |
+          pytest -v tests/

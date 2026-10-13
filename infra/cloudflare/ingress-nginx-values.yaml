@@ -1,0 +1,25 @@
+# Ingress-NGINX values configured for AI Inference with long-running SSE streaming
+controller:
+  replicaCount: 2
+  service:
+    type: ClusterIP # Strict security: no public host ports opened directly
+    ports:
+      http: 80
+      https: 443
+
+  config:
+    # SSE and long-running streaming LLM configuration
+    proxy-read-timeout: "3600"
+    proxy-send-timeout: "3600"
+    proxy-connect-timeout: "60"
+    proxy-buffering: "off"
+    proxy-request-buffering: "off"
+    proxy-body-size: "128m"
+    keep-alive: "3600"
+    client-header-timeout: "3600"
+    client-body-timeout: "3600"
+
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true

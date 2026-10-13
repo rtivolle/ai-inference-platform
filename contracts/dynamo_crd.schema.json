@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nvidia.com/schemas/dynamo_crd.schema.json",
+  "title": "DynamoGraphDeploymentCRD",
+  "description": "Validation schema for NVIDIA DynamoGraphDeployment Custom Resource",
+  "type": "object",
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "properties": {
+    "apiVersion": {
+      "type": "string",
+      "const": "nvidia.com/v1alpha1"
+    },
+    "kind": {
+      "type": "string",
+      "const": "DynamoGraphDeployment"
+    },
+    "metadata": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string" },
+        "namespace": { "type": "string" },
+        "labels": { "type": "object" },
+        "annotations": { "type": "object" }
+      }
+    },
+    "spec": {
+      "type": "object",
+      "required": ["backend", "model", "services"],
+      "properties": {
+        "backend": {
+          "type": "string",
+          "enum": ["vllm", "tensorrt-llm", "sglang"]
+        },
+        "model": {
+          "type": "string"
+        },
+        "sharedStorage": {
+          "type": "object",
+          "properties": {
+            "hostPath": { "type": "string" },
+            "persistentVolumeClaim": { "type": "string" }
+          }
+        },
+        "services": {
+          "type": "object",
+          "required": ["Frontend"],
+          "properties": {
+            "Frontend": {
+              "type": "object",
+              "required": ["replicas", "ports"],
+              "properties": {
+                "replicas": { "type": "integer", "minimum": 1 },
+                "ports": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["name", "port"],
+                    "properties": {
+                      "name": { "type": "string" },
+                      "port": { "type": "integer" }
+                    }
+                  }
+                }
+              }
+            },
+            "PrefillWorker": {
+              "type": "object",
+              "properties": {
+                "replicas": { "type": "integer", "minimum": 1 },
+                "resources": { "type": "object" },
+                "extraArgs": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                }
+              }
+            },
+            "DecodeWorker": {
+              "type": "object",
+              "properties": {
+                "replicas": { "type": "integer", "minimum": 1 },
+                "resources": { "type": "object" },
+                "extraArgs": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                }
+              }
+            },
+            "Worker": {
+              "type": "object",
+              "properties": {
+                "replicas": { "type": "integer", "minimum": 1 },
+                "resources": { "type": "object" },
+                "extraArgs": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

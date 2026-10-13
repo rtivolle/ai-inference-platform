@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nvidia.com/schemas/model_spec.schema.json",
+  "title": "ModelDeploymentSpecification",
+  "description": "Contracts for Model Deployment Request, Cluster Inventory, and Auto-Tuned Deployment Plan",
+  "$defs": {
+    "DeployRequest": {
+      "type": "object",
+      "required": ["model_id"],
+      "properties": {
+        "model_id": {
+          "type": "string",
+          "description": "Hugging Face model identifier or S3 URI"
+        },
+        "deployment_name": {
+          "type": "string",
+          "description": "Kubernetes safe DNS name for the deployment. Generated if omitted.",
+          "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+        },
+        "profile": {
+          "type": "string",
+          "enum": ["low-latency", "high-throughput", "balanced"],
+          "default": "balanced",
+          "description": "SLA performance profile targeting TTFT or throughput"
+        },
+        "quantization": {
+          "type": "string",
+          "enum": ["auto", "fp16", "bf16", "fp8", "awq", "int4"],
+          "default": "auto"
+        },
+        "max_model_len": {
+          "type": "integer",
+          "minimum": 512,
+          "maximum": 131072
+        },
+        "gpu_memory_utilization": {
+          "type": "number",
+          "minimum": 0.5,
+          "maximum": 0.98,
+          "default": 0.90
+        },
+        "target_concurrency": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 32
+        }
+      },
+      "additionalProperties": false
+    },
+    "GpuPool": {
+      "type": "object",
+      "required": ["gpu_sku", "vram_gb", "total_count", "available_count"],
+      "properties": {
+        "gpu_sku": {
+          "type": "string",
+          "examples": ["NVIDIA-H100-80GB", "NVIDIA-A100-80GB", "NVIDIA-L40S"]
+        },
+        "vram_gb": {
+          "type": "number",
+          "minimum": 8
+        },
+        "total_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "available_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "rdma_supported": {
+          "type": "boolean",
+          "default": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "ClusterInventory": {
+      "type": "object",
+      "required": ["nodes_count", "gpu_pools"],
+      "properties": {
+        "nodes_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "gpu_pools": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/GpuPool" }
+        },
+        "rdma_network_active": {
+          "type": "boolean",
+          "default": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "CliqueSpec": {
+      "type": "object",
+      "required": ["replicas", "tensor_parallel_size", "pipeline_parallel_size", "gpu_sku"],
+      "properties": {
+        "replicas": { "type": "integer", "minimum": 1 },
+        "tensor_parallel_size": { "type": "integer", "enum": [1, 2, 4, 8] },
+        "pipeline_parallel_size": { "type": "integer", "minimum": 1, "default": 1 },
+        "gpu_sku": { "type": "string" },
+        "max_num_batched_tokens": { "type": "integer" },
+        "enable_chunked_prefill": { "type": "boolean" },
+        "max_num_seqs": { "type": "integer" }
+      },
+      "additionalProperties": true
+    },
+    "KVCacheTransferSpec": {
+      "type": "object",
+      "required": ["protocol"],
+      "properties": {
+        "protocol": { "type": "string", "enum": ["rdma", "tcp"] },
+        "engine": { "type": "string" },
+        "Engine": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "DeploymentPlan": {
+      "type": "object",
+      "required": [
+        "model_id",
+        "serving_mode",
+        "quantization",
+        "max_model_len",
+        "gpu_memory_utilization",
+        "estimated_vram_gb_per_replica"
+      ],
+      "properties": {
+        "model_id": { "type": "string" },
+        "deployment_name": { "type": "string" },
+        "serving_mode": { "type": "string", "enum": ["disaggregated", "aggregated"] },
+        "quantization": { "type": "string", "enum": ["fp16", "bf16", "fp8", "awq", "int4", "none"] },
+        "max_model_len": { "type": "integer" },
+        "gpu_memory_utilization": { "type": "number", "minimum": 0.1, "maximum": 1.0 },
+        "estimated_vram_gb_per_replica": { "type": "number" },
+        "prefill_clique": { "$ref": "#/$defs/CliqueSpec" },
+        "decode_clique": { "$ref": "#/$defs/CliqueSpec" },
+        "worker_clique": { "$ref": "#/$defs/CliqueSpec" },
+        "kv_cache_transfer": { "$ref": "#/$defs/KVCacheTransferSpec" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "oneOf": [
+    { "$ref": "#/$defs/DeployRequest" },
+    { "$ref": "#/$defs/DeploymentPlan" },
+    { "$ref": "#/$defs/ClusterInventory" }
+  ]
+}

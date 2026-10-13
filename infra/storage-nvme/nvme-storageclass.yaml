@@ -1,0 +1,43 @@
+# Local NVMe StorageClass and Persistent Volume definitions for weights caching
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: local-nvme
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Retain
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: nvme-model-cache-pv
+  labels:
+    type: local-nvme
+spec:
+  capacity:
+    storage: 2Ti
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-nvme
+  local:
+    path: /mnt/nvme/model-cache
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: Exists
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nvme-model-cache-pvc
+  namespace: dynamo-workloads
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: local-nvme
+  resources:
+    requests:
+      storage: 2Ti

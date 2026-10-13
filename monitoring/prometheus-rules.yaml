@@ -1,0 +1,47 @@
+# Prometheus Alerting and Recording Rules for NVIDIA Dynamo & DCGM
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: ai-inference-platform-rules
+  namespace: monitoring
+  labels:
+    role: alert-rules
+spec:
+  groups:
+    - name: dynamo-vllm-metrics
+      rules:
+        # Aggregated recording rules
+        - record: vllm:num_requests_waiting
+          expr: sum by (model_name, namespace) (vllm_num_requests_waiting)
+        - record: vllm:gpu_cache_usage_perc
+          expr: max by (model_name, namespace) (vllm_gpu_cache_usage_factor)
+        - record: dcgm:gpu_utilization_avg
+          expr: avg by (gpu, model_name) (DCGM_FI_DEV_GPU_UTIL)
+
+        # Critical alerts
+        - alert: DynamoKVCacheExhaustion
+          expr: max by (model_name) (vllm:gpu_cache_usage_perc) > 0.95
+          for: 30s
+          labels:
+            severity: critical
+          annotations:
+            summary: "High KV-Cache Saturation on model {{ $labels.model_name }}"
+            description: "KV-Cache memory utilization is above 95% for more than 30 seconds. Risk of token eviction or OOM."
+
+        - alert: DynamoHighQueueWaiting
+          expr: sum by (model_name) (vllm:num_requests_waiting) > 20
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Request Queue Overflow on model {{ $labels.model_name }}"
+            description: "More than 20 requests waiting in queue. PrefillWorker scaling may be delayed."
+
+        - alert: GpuTemperatureHigh
+          expr: DCGM_FI_DEV_GPU_TEMP > 85
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "GPU Overheating on GPU {{ $labels.gpu }}"
+            description: "GPU core temperature exceeded 85C for 2 minutes."

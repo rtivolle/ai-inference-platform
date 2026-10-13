@@ -1,0 +1,131 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ai-gateway
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-config
+  namespace: ai-gateway
+data:
+  config.yaml: |
+    model_list: []
+    litellm_settings:
+      drop_params: true
+      request_timeout: 600
+    general_settings:
+      master_key: "sk-internal-litellm-master-key"
+      database_url: "postgresql://litellm:litellm_secret@postgres-service.ai-gateway.svc.cluster.local:5432/litellm"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: ai-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          env:
+            - name: POSTGRES_DB
+              value: litellm
+            - name: POSTGRES_USER
+              value: litellm
+            - name: POSTGRES_PASSWORD
+              value: litellm_secret
+          ports:
+            - containerPort: 5432
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-service
+  namespace: ai-gateway
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm-proxy
+  namespace: ai-gateway
+  labels:
+    app.kubernetes.io/name: litellm-proxy
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: litellm-proxy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: litellm-proxy
+    spec:
+      containers:
+        - name: litellm-proxy
+          image: ghcr.io/berriai/litellm:main-latest
+          args:
+            - --config
+            - /etc/litellm/config.yaml
+            - --port
+            - "4000"
+            - --num_workers
+            - "4"
+          env:
+            - name: LITELLM_MASTER_KEY
+              value: "sk-internal-litellm-master-key"
+            - name: DATABASE_URL
+              value: "postgresql://litellm:litellm_secret@postgres-service.ai-gateway.svc.cluster.local:5432/litellm"
+          ports:
+            - name: http
+              containerPort: 4000
+          volumeMounts:
+            - name: config
+              mountPath: /etc/litellm
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /health/liveliness
+              port: 4000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health/readiness
+              port: 4000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: litellm-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm-service
+  namespace: ai-gateway
+  labels:
+    app.kubernetes.io/name: litellm-proxy
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: litellm-proxy
+  ports:
+    - name: http
+      port: 4000
+      targetPort: 4000

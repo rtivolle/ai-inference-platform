@@ -1,0 +1,165 @@
+openapi: 3.1.0
+info:
+  title: AI Inference Control Plane API
+  version: 1.0.0
+  description: Control plane REST API for auto-tuning, provisioning NVIDIA Dynamo workloads, and synchronizing with LiteLLM Proxy.
+paths:
+  /api/v1/models/deploy:
+    post:
+      summary: Deploy or auto-tune and schedule a model on the cluster
+      operationId: deployModel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - model_id
+              properties:
+                model_id:
+                  type: string
+                  example: "meta-llama/Llama-3.3-70B-Instruct"
+                deployment_name:
+                  type: string
+                  example: "llama-3-3-70b"
+                profile:
+                  type: string
+                  enum: [low-latency, high-throughput, balanced]
+                  default: balanced
+                quantization:
+                  type: string
+                  enum: [auto, fp16, bf16, fp8, awq, int4]
+                  default: auto
+                max_model_len:
+                  type: integer
+                  default: 32768
+                gpu_memory_utilization:
+                  type: number
+                  default: 0.90
+                target_concurrency:
+                  type: integer
+                  default: 32
+      responses:
+        '200':
+          description: Model deployment plan computed and deployment accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "provisioning"
+                  deployment_name:
+                    type: string
+                  model_id:
+                    type: string
+                  plan:
+                    type: object
+        '400':
+          description: Invalid model request or lack of cluster GPU capacity
+        '500':
+          description: Internal error
+
+  /api/v1/models/{model_name}:
+    delete:
+      summary: Gracefully delete a model deployment (LiteLLM deregistration + drain + K8s cleanup)
+      operationId: deleteModel
+      parameters:
+        - name: model_name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Model deleted successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "deleted"
+                  model_name:
+                    type: string
+        '404':
+          description: Model deployment not found
+
+  /api/v1/models:
+    get:
+      summary: List all managed model deployments
+      operationId: listModels
+      responses:
+        '200':
+          description: Active deployments list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /api/v1/models/{model_name}/status:
+    get:
+      summary: Get live status of model deployment and endpoint readiness
+      operationId: getModelStatus
+      parameters:
+        - name: model_name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Status retrieved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deployment_name:
+                    type: string
+                  phase:
+                    type: string
+                  ready_endpoints:
+                    type: integer
+                  registered_in_litellm:
+                    type: boolean
+
+  /api/v1/cluster/gpus:
+    get:
+      summary: Get cluster GPU inventory and availability
+      operationId: getClusterGpus
+      responses:
+        '200':
+          description: Inventory
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  nodes_count:
+                    type: integer
+                  gpu_pools:
+                    type: array
+                    items:
+                      type: object
+
+  /health:
+    get:
+      summary: Liveness health probe
+      operationId: health
+      responses:
+        '200':
+          description: OK
+
+  /health/readiness:
+    get:
+      summary: Readiness probe checking K8s and LiteLLM connectivity
+      operationId: healthReadiness
+      responses:
+        '200':
+          description: Ready

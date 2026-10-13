@@ -1,0 +1,80 @@
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: "{{ deployment_name }}"
+  namespace: "{{ namespace | default('dynamo-workloads') }}"
+  labels:
+    app.kubernetes.io/name: "{{ deployment_name }}"
+    app.kubernetes.io/managed-by: dynamo-control-plane
+    dynamo.nvidia.com/serving-mode: disaggregated
+spec:
+  backend: vllm
+  model: "{{ model_id }}"
+  sharedStorage:
+    hostPath: "/mnt/nvme/model-cache"
+  services:
+    Frontend:
+      replicas: {{ frontend_replicas | default(2) }}
+      ports:
+        - name: http
+          port: 8000
+      env:
+        - name: MODEL_ID
+          value: "{{ model_id }}"
+        - name: DISAGGREGATED_MODE
+          value: "true"
+    PrefillWorker:
+      replicas: {{ prefill_clique.replicas }}
+      resources:
+        limits:
+          nvidia.com/gpu: {{ prefill_clique.tensor_parallel_size }}
+        requests:
+          nvidia.com/gpu: {{ prefill_clique.tensor_parallel_size }}
+      env:
+        - name: HF_HOME
+          value: "/mnt/nvme/model-cache"
+        - name: VLLM_KV_CACHE_TRANSFER_PROTOCOL
+          value: "{{ kv_cache_transfer.protocol | default('rdma') }}"
+        - name: VLLM_KV_CACHE_TRANSFER_ENGINE
+          value: "{{ kv_cache_transfer.engine | default('nixl') }}"
+      extraArgs:
+        - "--tensor-parallel-size={{ prefill_clique.tensor_parallel_size }}"
+        {% if prefill_clique.pipeline_parallel_size and prefill_clique.pipeline_parallel_size > 1 %}
+        - "--pipeline-parallel-size={{ prefill_clique.pipeline_parallel_size }}"
+        {% endif %}
+        - "--quantization={{ quantization }}"
+        - "--max-model-len={{ max_model_len }}"
+        - "--gpu-memory-utilization={{ gpu_memory_utilization }}"
+        {% if prefill_clique.max_num_batched_tokens %}
+        - "--max-num-batched-tokens={{ prefill_clique.max_num_batched_tokens }}"
+        {% endif %}
+        {% if prefill_clique.enable_chunked_prefill %}
+        - "--enable-chunked-prefill=true"
+        {% endif %}
+        - "--download-dir=/mnt/nvme/model-cache"
+    DecodeWorker:
+      replicas: {{ decode_clique.replicas }}
+      resources:
+        limits:
+          nvidia.com/gpu: {{ decode_clique.tensor_parallel_size }}
+        requests:
+          nvidia.com/gpu: {{ decode_clique.tensor_parallel_size }}
+      env:
+        - name: HF_HOME
+          value: "/mnt/nvme/model-cache"
+        - name: VLLM_KV_CACHE_TRANSFER_PROTOCOL
+          value: "{{ kv_cache_transfer.protocol | default('rdma') }}"
+        - name: VLLM_KV_CACHE_TRANSFER_ENGINE
+          value: "{{ kv_cache_transfer.engine | default('nixl') }}"
+      extraArgs:
+        - "--tensor-parallel-size={{ decode_clique.tensor_parallel_size }}"
+        {% if decode_clique.pipeline_parallel_size and decode_clique.pipeline_parallel_size > 1 %}
+        - "--pipeline-parallel-size={{ decode_clique.pipeline_parallel_size }}"
+        {% endif %}
+        - "--quantization={{ quantization }}"
+        - "--max-model-len={{ max_model_len }}"
+        - "--gpu-memory-utilization={{ gpu_memory_utilization }}"
+        {% if decode_clique.max_num_seqs %}
+        - "--max-num-seqs={{ decode_clique.max_num_seqs }}"
+        {% endif %}
+        - "--download-dir=/mnt/nvme/model-cache"
