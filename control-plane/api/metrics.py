@@ -135,7 +135,8 @@ class UsageMetrics:
         """Drain checks must fail closed when monitoring has no usable sample."""
         if not self.base_url:
             raise MetricsUnavailableError("Prometheus is not configured; active requests cannot be verified.")
-        expression = self.definitions(model_id)["running_requests"][0]
+        selector = f'vllm:num_requests_running{{namespace={json.dumps(self.namespace)},model_name={json.dumps(model_id)}}}'
+        expression = f"sum({selector} and (time() - timestamp({selector}) < 60))"
         headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
         try:
             async with httpx.AsyncClient(timeout=5, headers=headers, transport=self.transport) as http:

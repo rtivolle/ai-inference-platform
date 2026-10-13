@@ -7,6 +7,7 @@ from api.dynamo_reconciler import DynamoReconciler
 from api.k8s_client import K8sClient
 from api.litellm_sync import LiteLLMSync
 from autotuner.vram_calculator import ModelArchitectureSpecs, VRAMCalculator
+from starlette.testclient import TestClient
 
 
 @pytest.fixture
@@ -53,3 +54,18 @@ def mock_litellm():
 @pytest.fixture
 def reconciler(mock_k8s, mock_litellm):
     return DynamoReconciler(k8s_client=mock_k8s, litellm_sync=mock_litellm, drain_timeout_seconds=0)
+
+
+@pytest.fixture
+def api_client(monkeypatch, mock_k8s, mock_litellm, reconciler):
+    monkeypatch.setenv("CONTROL_PLANE_MOCK", "1")
+    monkeypatch.setenv("CONTROL_PLANE_API_TOKEN", "test-token")
+    from api import main
+    from api.metrics import UsageMetrics
+
+    monkeypatch.setattr(main, "k8s_client", mock_k8s)
+    monkeypatch.setattr(main, "litellm_sync", mock_litellm)
+    monkeypatch.setattr(main, "reconciler", reconciler)
+    monkeypatch.setattr(main, "usage_metrics", UsageMetrics(base_url=""))
+    with TestClient(main.app) as client:
+        yield client

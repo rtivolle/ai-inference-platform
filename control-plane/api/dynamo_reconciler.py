@@ -197,6 +197,17 @@ class DynamoReconciler:
             self._in_memory_cache[deployment_name]["status"] = "readiness_timeout"
 
     async def delete_model(self, deployment_name: str, namespace: str = "dynamo-workloads") -> bool:
+        cached = self._in_memory_cache.setdefault(deployment_name, {"name": deployment_name, "namespace": namespace})
+        cached["status"] = "deleting"
+        cached.pop("error", None)
+        try:
+            return await self._delete_model_resources(deployment_name, namespace)
+        except Exception as exc:
+            cached["status"] = "delete_failed"
+            cached["error"] = str(exc)
+            raise
+
+    async def _delete_model_resources(self, deployment_name: str, namespace: str) -> bool:
         """
         Graceful teardown (D1 & D8):
         1. Deregisters from LiteLLM (blocks K8s deletion if this fails!)
@@ -219,6 +230,9 @@ class DynamoReconciler:
                 break
             await asyncio.sleep(poll_step)
             drain_elapsed += poll_step
+        else:
+            if not self.k8s.mock_mode:
+                raise TimeoutError("Active requests did not drain before the deadline; the Kubernetes workload was retained.")
 
         # Remove external autoscalers before deleting the operator-owned graph.
         # Deterministic names allow cleanup even after a control-plane restart.
@@ -244,6 +258,7 @@ class DynamoReconciler:
                 "namespace": cr.get("metadata", {}).get("namespace", namespace),
                 "serving_mode": cr.get("metadata", {}).get("labels", {}).get("dynamo.nvidia.com/serving-mode"),
                 "plan": cached.get("plan"),
+                "error": cached.get("error"),
                 "status": cached.get("status", "running"),
                 "ready": cached.get("ready", True),
                 "k8s_cr": cr,

@@ -7,6 +7,7 @@ Adheres to R1, R2, R3 specifications:
 - Model not found mapped to HTTP 404 (D9).
 """
 
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -14,14 +15,19 @@ from autotuner.hf_inspector import ModelNotFoundError
 from autotuner.sla_planner import ClusterInventory, DeployRequest, SLAPlanner
 from autotuner.vram_calculator import InsufficientCapacityError
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from kubernetes_asyncio.client.rest import ApiException
+from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from api.auth import router as auth_router
 from api.auth import verify_auth
+from api.data_routes import router as data_router
+from api.data_store import DataError
 from api.dynamo_reconciler import DynamoReconciler
 from api.k8s_client import K8sClient
+from api.k8s_controls import ControlError, KubernetesControls
 from api.litellm_sync import LiteLLMSync
 from api.metrics import UsageMetrics
 
@@ -31,6 +37,16 @@ litellm_sync = LiteLLMSync()
 reconciler = DynamoReconciler(k8s_client=k8s_client, litellm_sync=litellm_sync)
 sla_planner = SLAPlanner()
 usage_metrics = UsageMetrics()
+logger = logging.getLogger("control_plane")
+
+
+class ScaleRequest(BaseModel):
+    replicas: int = Field(ge=1, le=64)
+    resource_version: str | None = Field(default=None, max_length=128)
+
+
+class EvictionRequest(BaseModel):
+    uid: str = Field(min_length=1, max_length=128)
 
 
 @asynccontextmanager
@@ -48,6 +64,24 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.include_router(auth_router)
+app.include_router(data_router)
+
+
+@app.exception_handler(DataError)
+async def data_error(request, error: DataError):
+    return JSONResponse(status_code=error.status, content={"detail": str(error)}, headers={"Cache-Control": "no-store"})
+
+
+@app.exception_handler(ControlError)
+async def control_error(request, error: ControlError):
+    return JSONResponse(status_code=error.status, content={"detail": str(error)})
+
+
+@app.exception_handler(ApiException)
+async def kubernetes_error(request, error: ApiException):
+    messages = {403: "Kubernetes permissions denied this operation.", 404: "The Kubernetes resource was not found.", 409: "The Kubernetes resource changed. Refresh and try again.", 429: "Kubernetes blocked this operation; a disruption budget or rate limit may be active."}
+    code = 409 if error.status == 429 else error.status if error.status in (403, 404, 409) else 503
+    return JSONResponse(status_code=code, content={"detail": messages.get(error.status, "Kubernetes is unavailable. Try again after the cluster connection recovers.")})
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 app.mount("/assets", StaticFiles(directory=WEB_DIR), name="web-assets")
@@ -79,6 +113,39 @@ async def get_usage_metrics(window_minutes: int = Query(15, ge=5, le=60)):
     if window_minutes not in (5, 15, 60):
         raise HTTPException(422, "Metrics window must be 5, 15, or 60 minutes.")
     return await usage_metrics.snapshot(window_minutes)
+
+
+@app.get("/api/v1/cluster/nodes", tags=["Kubernetes"], dependencies=[Depends(verify_auth)])
+async def get_cluster_nodes():
+    return await KubernetesControls(k8s_client).nodes()
+
+
+@app.get("/api/v1/models/{model_name}/workload", tags=["Kubernetes"], dependencies=[Depends(verify_auth)])
+async def get_model_workload(model_name: str):
+    controls = KubernetesControls(k8s_client)
+    return {"namespace": "dynamo-workloads", "pods": await controls.pods(model_name), "components": await controls.components(model_name)}
+
+
+@app.post("/api/v1/models/{model_name}/components/{component_name}/scale", tags=["Kubernetes"], dependencies=[Depends(verify_auth)])
+async def scale_model_component(model_name: str, component_name: str, payload: ScaleRequest):
+    return await KubernetesControls(k8s_client).scale(model_name, component_name, payload.replicas, payload.resource_version)
+
+
+@app.get("/api/v1/models/{model_name}/pods/{pod_name}/logs", tags=["Kubernetes"], dependencies=[Depends(verify_auth)])
+async def get_model_pod_logs(model_name: str, pod_name: str, container: str | None = Query(None, max_length=128), tail_lines: int = Query(100, ge=1, le=500)):
+    return await KubernetesControls(k8s_client).pod_logs(model_name, pod_name, container, tail_lines)
+
+
+@app.post("/api/v1/models/{model_name}/pods/{pod_name}/evict", tags=["Kubernetes"], dependencies=[Depends(verify_auth)])
+async def replace_model_pod(model_name: str, pod_name: str, payload: EvictionRequest):
+    return await KubernetesControls(k8s_client).evict_pod(model_name, pod_name, payload.uid)
+
+
+async def delete_in_background(model_name: str):
+    try:
+        await reconciler.delete_model(model_name)
+    except Exception:
+        logger.exception("Deletion failed for deployment %s", model_name)
 
 
 @app.post(
@@ -117,7 +184,7 @@ async def delete_model(model_name: str, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Deployment '{model_name}' not found.")
 
     # Initiate graceful dynamic drain and teardown
-    background_tasks.add_task(reconciler.delete_model, model_name)
+    background_tasks.add_task(delete_in_background, model_name)
     return {
         "status": "deleting",
         "model_name": model_name,

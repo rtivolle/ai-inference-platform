@@ -20,6 +20,11 @@ const state = {
   inventory: null,
   session: 0,
   refreshing: false,
+  user: null,
+  csrf: "",
+  authConfig: null,
+  workload: null,
+  workloadRequest: 0,
 };
 const pendingRequests = new Set();
 let deleteTarget = null;
@@ -37,13 +42,18 @@ async function api(path, { method = "GET", body, timeout = 20000 } = {}) {
   pendingRequests.add(controller);
   const timer = setTimeout(() => controller.abort(), timeout);
   try {
-    const headers = { Authorization: `Bearer ${state.token}` };
+    const headers = state.token
+      ? { Authorization: `Bearer ${state.token}` }
+      : {};
+    if (!["GET", "HEAD"].includes(method) && state.csrf)
+      headers["X-CSRF-Token"] = state.csrf;
     if (body !== undefined) headers["Content-Type"] = "application/json";
     const response = await fetch(path, {
       method,
       headers,
       signal: controller.signal,
       cache: "no-store",
+      credentials: "same-origin",
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
     const data = await response.json();
@@ -93,15 +103,23 @@ function busyDialog(id, busy) {
   const dialog = $(id);
   dialog.dataset.busy = String(busy);
   dialog.querySelectorAll("button, input, select").forEach((element) => {
-    element.disabled = busy;
+    if (busy) {
+      element.dataset.wasDisabled = String(element.disabled);
+      element.disabled = true;
+    } else {
+      element.disabled = element.dataset.wasDisabled === "true";
+      delete element.dataset.wasDisabled;
+    }
   });
   // Keep the connection in place until an in-flight mutation finishes.
   $("connection-button").disabled = busy;
 }
 
-function openConnect() {
+async function openConnect() {
+  if (!state.authConfig) await checkAuthentication();
   formError("connect-error");
   $("api-token").value = "";
+  $("admin-password").value = "";
   $("connect-dialog").showModal();
 }
 
@@ -170,9 +188,9 @@ function setConnectedControls() {
     $(id).disabled = !state.connected;
   $("connection-dot").className =
     `status-dot${state.connected ? " green" : ""}`;
-  $("connection-label").textContent = state.connected
-    ? "Disconnect"
-    : "Connect";
+  $("connection-label").textContent = state.connected ? "Sign out" : "Sign in";
+  $("user-label").hidden = !state.user;
+  $("user-label").textContent = state.user?.username || "";
 }
 
 function resetWorkspace() {
@@ -191,6 +209,7 @@ function resetWorkspace() {
   $("sync-label").textContent = "Not connected";
   $("last-updated").textContent = "Updates every 10 seconds";
   renderModels();
+  resetOperations();
 }
 
 function disconnect() {
@@ -201,6 +220,8 @@ function disconnect() {
   state.models = [];
   state.inventory = null;
   state.refreshing = false;
+  state.user = null;
+  state.csrf = "";
   $("model-search").value = "";
   $("status-filter").value = "all";
   $("error-notice").hidden = true;
@@ -300,6 +321,8 @@ function applyWorkspace(data) {
   $("last-updated").textContent =
     `Updated ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`;
   renderWorkspace();
+  updateWorkloadChoices();
+  refreshOperations();
 }
 
 async function refreshWorkspace() {
@@ -317,7 +340,7 @@ async function refreshWorkspace() {
       openConnect();
       formError(
         "connect-error",
-        "Your token was rejected. Enter a valid token to reconnect.",
+        "Your session expired or access was revoked. Sign in again.",
       );
     } else {
       $("error-notice").textContent =
@@ -336,14 +359,34 @@ async function refreshWorkspace() {
 
 $("connect-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const token = $("api-token").value.trim();
-  if (!token) return formError("connect-error", "Enter your API token.");
-  state.token = token;
+  const passwordLogin = state.authConfig?.login_enabled;
+  if (!passwordLogin) {
+    const token = $("api-token").value.trim();
+    if (!token)
+      return formError("connect-error", "Enter your development API token.");
+    state.token = token;
+  }
   const session = ++state.session;
   busyDialog("connect-dialog", true);
   formError("connect-error");
-  $("connect-submit").textContent = "Connecting…";
+  $("connect-submit").textContent = "Signing in…";
   try {
+    if (passwordLogin) {
+      const identity = await api("/auth/login", {
+        method: "POST",
+        body: {
+          username: $("admin-username").value.trim(),
+          password: $("admin-password").value,
+        },
+      });
+      state.user = identity;
+      state.csrf = identity.csrf_token;
+      state.connected = true;
+      setConnectedControls();
+      $("connect-dialog").close();
+      await refreshWorkspace();
+      return;
+    }
     const data = await loadWorkspace();
     if (session !== state.session) return;
     state.connected = true;
@@ -356,12 +399,17 @@ $("connect-form").addEventListener("submit", async (event) => {
     formError(
       "connect-error",
       error.status === 401
-        ? "That token was rejected. Check your API token and try again."
+        ? passwordLogin
+          ? "Invalid username or password."
+          : "That development token was rejected."
         : error.message,
     );
   } finally {
     busyDialog("connect-dialog", false);
-    $("connect-submit").textContent = "Connect to platform →";
+    $("admin-password").value = "";
+    $("connect-submit").textContent = passwordLogin
+      ? "Sign in →"
+      : "Connect to mock environment →";
   }
 });
 
@@ -518,8 +566,7 @@ $("refresh-button").addEventListener("click", refreshWorkspace);
 $("new-deployment-button").addEventListener("click", openDeploy);
 $("connection-button").addEventListener("click", () => {
   if (state.connected) {
-    disconnect();
-    toast("Disconnected. Your token has been cleared.");
+    signOut();
   } else openConnect();
 });
 $("empty-action").addEventListener("click", () => {
@@ -540,20 +587,41 @@ document.querySelectorAll("dialog").forEach((dialog) => {
     if (dialog.dataset.busy === "true") event.preventDefault();
   });
   dialog.addEventListener("close", () => {
-    if (dialog.id === "connect-dialog") $("api-token").value = "";
+    if (dialog.id === "connect-dialog") {
+      $("api-token").value = "";
+      $("admin-password").value = "";
+    }
   });
 });
 
 function navigate() {
-  const view = location.hash === "#gpus" ? "gpus" : "deployments";
-  $("deployments-view").hidden = view !== "deployments";
-  $("gpus-view").hidden = view !== "gpus";
-  $("page-title").textContent =
-    view === "gpus" ? "GPU inventory" : "Model deployments";
-  $("page-description").textContent =
-    view === "gpus"
-      ? "Understand your cluster capacity before your next deployment."
-      : "Deploy, monitor, and manage your inference workloads.";
+  const view = ["gpus", "metrics", "kubernetes"].includes(
+    location.hash.slice(1),
+  )
+    ? location.hash.slice(1)
+    : "deployments";
+  for (const name of ["deployments", "gpus", "metrics", "kubernetes"])
+    $(`${name}-view`).hidden = name !== view;
+  const headings = {
+    deployments: [
+      "Model deployments",
+      "Deploy, monitor, and manage your inference workloads.",
+    ],
+    gpus: [
+      "GPU inventory",
+      "Understand your cluster capacity before your next deployment.",
+    ],
+    metrics: [
+      "Live usage",
+      "Monitor inference throughput, request load, and GPU usage.",
+    ],
+    kubernetes: [
+      "Kubernetes",
+      "Inspect your cluster and operate managed inference workloads.",
+    ],
+  };
+  $("page-title").textContent = headings[view][0];
+  $("page-description").textContent = headings[view][1];
   $("breadcrumb-view").textContent = $("page-title").textContent;
   document.querySelectorAll("[data-view]").forEach((link) => {
     const active = link.dataset.view === view;
@@ -561,6 +629,7 @@ function navigate() {
     if (active) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
   });
+  if (state.connected) refreshOperations();
 }
 window.addEventListener("hashchange", navigate);
 document.addEventListener("visibilitychange", () => {
@@ -590,7 +659,400 @@ async function checkService() {
   }
 }
 
+let scaleTarget = null;
+let replacementTarget = null;
+let logsTarget = null;
+let metricsRequest = 0;
+
+async function checkAuthentication() {
+  try {
+    const response = await fetch("/auth/config", {
+      cache: "no-store",
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!response.ok) throw new Error("Authentication service unavailable.");
+    state.authConfig = await response.json();
+    const passwordLogin = state.authConfig.login_enabled;
+    const development = !passwordLogin && state.authConfig.mock_token_enabled;
+    $("username-field").hidden = !passwordLogin;
+    $("password-field").hidden = !passwordLogin;
+    $("login-session-help").hidden = !passwordLogin;
+    $("admin-username").disabled = !passwordLogin;
+    $("admin-password").disabled = !passwordLogin;
+    $("api-token").disabled = !development;
+    $("development-access").hidden = !development;
+    $("login-setup-notice").hidden = passwordLogin || development;
+    $("connect-submit").disabled = !passwordLogin && !development;
+    $("connect-submit").textContent = passwordLogin
+      ? "Sign in →"
+      : development
+        ? "Connect to mock environment →"
+        : "Sign-in unavailable";
+  } catch {
+    state.authConfig = { login_enabled: false, mock_token_enabled: false };
+    $("connect-submit").disabled = true;
+    $("login-setup-notice").hidden = false;
+    $("login-setup-notice").textContent =
+      "The authentication service is unavailable.";
+  }
+}
+
+async function restoreSession() {
+  try {
+    const identity = await api("/auth/session");
+    state.user = identity;
+    state.csrf = identity.csrf_token;
+    state.connected = true;
+    setConnectedControls();
+    await refreshWorkspace();
+  } catch {
+    /* A new tab can remain signed out without presenting an error. */
+  }
+}
+
+async function signOut() {
+  $("connection-button").disabled = true;
+  try {
+    if (state.user) await api("/auth/logout", { method: "POST" });
+    disconnect();
+    toast("Signed out. Your session has been revoked.");
+  } catch (error) {
+    if (error.status === 401) disconnect();
+    else {
+      $("error-notice").textContent = `Sign-out failed: ${error.message}`;
+      $("error-notice").hidden = false;
+    }
+  } finally {
+    $("connection-button").disabled = false;
+  }
+}
+
+function resetOperations() {
+  state.workload = null;
+  state.workloadRequest += 1;
+  metricsRequest += 1;
+  $("workload-select").innerHTML =
+    '<option value="">Select a deployment</option>';
+  $("workload-select").disabled = true;
+  $("node-cards").replaceChildren();
+  $("component-controls").replaceChildren();
+  $("pod-rows").replaceChildren();
+  $("pod-count").textContent = "0";
+  $("pod-empty").hidden = false;
+  $("workload-notice").hidden = false;
+  $("workload-notice").textContent =
+    "Select a model deployment to inspect its workload.";
+  $("nodes-notice").hidden = true;
+  $("usage-cards").replaceChildren();
+  $("metrics-notice").hidden = false;
+  $("metrics-notice").textContent = "Sign in to view live usage.";
+  for (const name of ["requests", "tokens"]) {
+    $(`${name}-chart`).innerHTML =
+      '<p class="chart-empty">No samples loaded</p>';
+    $(`${name}-chart-status`).textContent = "No data";
+  }
+  $("metrics-updated").textContent =
+    "Values are shown only when monitoring returns a usable sample.";
+}
+
+function updateWorkloadChoices() {
+  const selected = $("workload-select").value;
+  $("workload-select").innerHTML =
+    '<option value="">Select a deployment</option>' +
+    state.models
+      .map(
+        (model) =>
+          `<option value="${escapeHtml(model.name)}">${escapeHtml(model.name)}</option>`,
+      )
+      .join("");
+  if (state.models.some((model) => model.name === selected))
+    $("workload-select").value = selected;
+  else {
+    state.workload = null;
+    $("component-controls").replaceChildren();
+    $("pod-rows").replaceChildren();
+    $("pod-empty").hidden = false;
+  }
+  $("workload-select").disabled = !state.connected || !state.models.length;
+}
+
+function metricValue(metric) {
+  if (!Number.isFinite(metric.value)) return "—";
+  if (metric.unit === "seconds")
+    return `${(metric.value * 1000).toLocaleString(undefined, { maximumFractionDigits: 0 })} ms`;
+  return `${metric.value.toLocaleString(undefined, { maximumFractionDigits: metric.unit === "requests" ? 0 : 1 })}${metric.unit === "%" ? "%" : ""}`;
+}
+
+function chart(name, metric, windowMinutes) {
+  const target = $(`${name}-chart`);
+  const points = metric.history || [];
+  const finite = points.filter(
+    ([time, value]) => Number.isFinite(time) && Number.isFinite(value),
+  );
+  $(`${name}-chart-status`).textContent = finite.length
+    ? "Prometheus"
+    : "No samples";
+  if (!finite.length) {
+    target.innerHTML =
+      '<p class="chart-empty">No usable samples in this time window</p>';
+    return;
+  }
+  const end = points[points.length - 1][0];
+  const start = end - windowMinutes * 60;
+  const maximum = Math.max(1, ...finite.map(([, value]) => value)) * 1.08;
+  const x = (time) => 50 + ((time - start) / (end - start)) * 530;
+  const y = (value) => 190 - (Math.max(0, value) / maximum) * 160;
+  const segments = [];
+  let segment = [];
+  let previous = null;
+  const step = windowMinutes < 60 ? 15 : 60;
+  for (const [time, value] of points) {
+    if (
+      !Number.isFinite(time) ||
+      !Number.isFinite(value) ||
+      (previous !== null && time - previous > step * 1.5)
+    ) {
+      if (segment.length) segments.push(segment);
+      segment = [];
+    }
+    if (Number.isFinite(time) && Number.isFinite(value))
+      segment.push(`${x(time).toFixed(2)},${y(value).toFixed(2)}`);
+    previous = time;
+  }
+  if (segment.length) segments.push(segment);
+  const date = (time) =>
+    new Date(time * 1000).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  target.innerHTML = `<svg viewBox="0 0 610 235" role="img" aria-label="${escapeHtml(metric.label)} over ${windowMinutes} minutes. Latest value ${escapeHtml(metricValue(metric))}."><line class="chart-gridline" x1="50" x2="580" y1="30" y2="30"/><line class="chart-gridline" x1="50" x2="580" y1="110" y2="110"/><line class="chart-gridline" x1="50" x2="580" y1="190" y2="190"/><text x="43" y="34" text-anchor="end">${maximum.toFixed(maximum < 10 ? 1 : 0)}</text><text x="43" y="114" text-anchor="end">${(maximum / 2).toFixed(maximum < 10 ? 1 : 0)}</text><text x="43" y="194" text-anchor="end">0</text>${segments.map((segment) => `<polyline class="chart-line" points="${segment.join(" ")}"/>`).join("")}<text x="50" y="220">${escapeHtml(date(start))}</text><text x="580" y="220" text-anchor="end">${escapeHtml(date(end))}</text></svg>`;
+}
+
+async function refreshMetrics() {
+  const session = state.session;
+  const request = ++metricsRequest;
+  try {
+    const data = await api(
+      `/api/v1/metrics/usage?window_minutes=${$("metrics-window").value}`,
+    );
+    if (session !== state.session || request !== metricsRequest) return;
+    const notices = {
+      ready:
+        "Live telemetry from Prometheus. Updated every 10 seconds while this view is open.",
+      partial:
+        "Some metrics have no usable samples. Missing values are shown as —.",
+      unavailable: "Monitoring is unavailable. Check the telemetry connection.",
+      not_configured:
+        "Monitoring is not connected. Configure the Prometheus endpoint to enable live usage.",
+    };
+    $("metrics-notice").textContent =
+      notices[data.status] || "Monitoring status is unknown.";
+    $("usage-cards").innerHTML = Object.values(data.metrics)
+      .map(
+        (metric) =>
+          `<article class="stat-card usage-card"><span class="stat-label">${escapeHtml(metric.label)}</span><div class="stat-value">${escapeHtml(metricValue(metric))}</div><span class="stat-caption">${metric.status === "ready" ? escapeHtml(metric.unit === "seconds" ? "p95 latency" : metric.unit) : metric.status === "partial" ? "Partial telemetry" : "No usable sample"}</span></article>`,
+      )
+      .join("");
+    chart("requests", data.metrics.request_rate, data.window_minutes);
+    chart("tokens", data.metrics.output_tokens, data.window_minutes);
+    $("metrics-updated").textContent =
+      `Source: Prometheus · ${data.namespace} · Checked ${new Date(data.collected_at).toLocaleTimeString()}`;
+  } catch (error) {
+    if (session === state.session && request === metricsRequest) {
+      $("metrics-notice").textContent = error.message;
+      $("usage-cards").replaceChildren();
+      for (const name of ["requests", "tokens"])
+        $(`${name}-chart`).innerHTML =
+          '<p class="chart-empty">Monitoring request failed</p>';
+    }
+  }
+}
+
+async function refreshNodes() {
+  const session = state.session;
+  try {
+    const nodes = await api("/api/v1/cluster/nodes");
+    if (session !== state.session) return;
+    $("nodes-notice").hidden = true;
+    $("node-cards").innerHTML = nodes
+      .map(
+        (node) =>
+          `<article class="gpu-card node-card"><div class="gpu-card-heading"><div><h3>${escapeHtml(node.name)}</h3><p>${escapeHtml(node.gpu_sku || "CPU node")}</p></div><span class="badge ${node.ready ? "ready" : "failed"}">${node.ready ? "Ready" : "Not ready"}</span></div><dl class="detail-grid"><div><dt>GPUs</dt><dd>${escapeHtml(node.gpu_count)}</dd></div><div><dt>Scheduling</dt><dd>${node.schedulable ? "Enabled" : "Cordoned"}</dd></div><div><dt>CPU capacity</dt><dd>${escapeHtml(node.cpu || "Unknown")}</dd></div><div><dt>Memory capacity</dt><dd>${escapeHtml(node.memory || "Unknown")}</dd></div></dl>${node.pressure.length ? `<p class="danger-text">${escapeHtml(node.pressure.join(", "))}</p>` : ""}</article>`,
+      )
+      .join("");
+  } catch (error) {
+    if (session === state.session) {
+      $("nodes-notice").textContent = error.message;
+      $("nodes-notice").hidden = false;
+    }
+  }
+}
+
+async function refreshWorkload() {
+  const name = $("workload-select").value;
+  const session = state.session;
+  const request = ++state.workloadRequest;
+  if (!name) {
+    $("component-controls").replaceChildren();
+    $("pod-rows").replaceChildren();
+    $("pod-empty").hidden = false;
+    $("pod-count").textContent = "0";
+    return;
+  }
+  try {
+    const workload = await api(
+      `/api/v1/models/${encodeURIComponent(name)}/workload`,
+    );
+    if (
+      session !== state.session ||
+      request !== state.workloadRequest ||
+      name !== $("workload-select").value
+    )
+      return;
+    state.workload = workload;
+    $("workload-notice").hidden = true;
+    $("component-controls").innerHTML = workload.components
+      .map(
+        (component) =>
+          `<article class="panel component-card"><div><h3>${escapeHtml(component.name)}</h3><p>${escapeHtml(component.desired_replicas)} desired replicas${component.current_replicas !== null ? ` · ${escapeHtml(component.current_replicas)} observed` : ""}</p><span class="stat-caption">${escapeHtml(component.gpu_per_replica)} GPUs per replica</span></div><button class="button secondary" data-component="${escapeHtml(component.name)}" ${!component.can_scale ? "disabled" : ""}>Change replicas</button>${component.blocked_reason ? `<p class="component-reason">${escapeHtml(component.blocked_reason)}</p>` : ""}</article>`,
+      )
+      .join("");
+    $("pod-count").textContent = workload.pods.length;
+    $("pod-empty").hidden = workload.pods.length > 0;
+    $("pod-rows").innerHTML = workload.pods
+      .map(
+        (pod) =>
+          `<tr><td><strong class="pod-name">${escapeHtml(pod.name)}</strong><span class="model-id">${escapeHtml(pod.component)}</span></td><td><span class="badge ${pod.ready ? "ready" : pod.phase === "Failed" ? "failed" : "provisioning"}">${pod.ready ? "Ready" : escapeHtml(pod.phase)}</span></td><td>${escapeHtml(pod.node || "Unscheduled")}</td><td>${escapeHtml(pod.restarts)}</td><td><div class="row-actions"><button class="text-button" data-pod-action="logs" data-pod="${escapeHtml(pod.name)}">Logs</button><button class="text-button delete" data-pod-action="replace" data-pod="${escapeHtml(pod.name)}">Replace</button></div></td></tr>`,
+      )
+      .join("");
+  } catch (error) {
+    if (session === state.session && request === state.workloadRequest) {
+      $("workload-notice").hidden = false;
+      $("workload-notice").textContent = error.message;
+      $("component-controls").replaceChildren();
+      $("pod-rows").replaceChildren();
+      state.workload = null;
+    }
+  }
+}
+
+function refreshOperations() {
+  if (!state.connected || document.hidden) return;
+  if (location.hash === "#metrics") refreshMetrics();
+  if (location.hash === "#kubernetes") {
+    refreshNodes();
+    refreshWorkload();
+  }
+}
+
+$("metrics-window").addEventListener("change", () => {
+  if (state.connected) refreshMetrics();
+});
+$("workload-select").addEventListener("change", refreshWorkload);
+$("component-controls").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-component]");
+  if (!button || button.disabled) return;
+  scaleTarget = state.workload.components.find(
+    (component) => component.name === button.dataset.component,
+  );
+  if (!scaleTarget) return;
+  $("scale-description").textContent =
+    `${$("workload-select").value} · ${scaleTarget.name} currently requests ${scaleTarget.desired_replicas} replicas. Each replica requires ${scaleTarget.gpu_per_replica} GPUs.`;
+  $("scale-replicas").value = scaleTarget.desired_replicas;
+  $("scale-replicas").min = scaleTarget.minimum_replicas;
+  formError("scale-error");
+  $("scale-dialog").showModal();
+});
+$("scale-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!scaleTarget) return;
+  const name = $("workload-select").value;
+  busyDialog("scale-dialog", true);
+  try {
+    await api(
+      `/api/v1/models/${encodeURIComponent(name)}/components/${encodeURIComponent(scaleTarget.name)}/scale`,
+      {
+        method: "POST",
+        body: {
+          replicas: Number($("scale-replicas").value),
+          resource_version: scaleTarget.resource_version,
+        },
+      },
+    );
+    $("scale-dialog").close();
+    toast("Replica change accepted by the control plane.");
+    await refreshWorkspace();
+  } catch (error) {
+    formError("scale-error", error.message);
+  } finally {
+    busyDialog("scale-dialog", false);
+  }
+});
+$("pod-rows").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-pod-action]");
+  if (!button || !state.workload) return;
+  const pod = state.workload.pods.find(
+    (pod) => pod.name === button.dataset.pod,
+  );
+  if (!pod) return;
+  const deployment = $("workload-select").value;
+  if (button.dataset.podAction === "replace") {
+    replacementTarget = { deployment, ...pod };
+    $("replacement-pod-name").textContent = pod.name;
+    formError("replacement-error");
+    $("replacement-dialog").showModal();
+  } else {
+    logsTarget = { deployment, ...pod };
+    $("logs-title").textContent = pod.name;
+    $("logs-container").innerHTML = pod.containers
+      .map((name) => `<option>${escapeHtml(name)}</option>`)
+      .join("");
+    $("logs-dialog").showModal();
+    loadLogs();
+  }
+});
+$("replacement-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!replacementTarget) return;
+  busyDialog("replacement-dialog", true);
+  try {
+    await api(
+      `/api/v1/models/${encodeURIComponent(replacementTarget.deployment)}/pods/${encodeURIComponent(replacementTarget.name)}/evict`,
+      { method: "POST", body: { uid: replacementTarget.uid } },
+    );
+    $("replacement-dialog").close();
+    toast("Pod replacement requested. Kubernetes will reconcile the workload.");
+    await refreshWorkload();
+  } catch (error) {
+    formError("replacement-error", error.message);
+  } finally {
+    busyDialog("replacement-dialog", false);
+  }
+});
+async function loadLogs() {
+  if (!logsTarget) return;
+  const session = state.session;
+  $("logs-content").textContent = "Loading container logs…";
+  $("logs-refresh").disabled = true;
+  try {
+    const data = await api(
+      `/api/v1/models/${encodeURIComponent(logsTarget.deployment)}/pods/${encodeURIComponent(logsTarget.name)}/logs?container=${encodeURIComponent($("logs-container").value)}&tail_lines=100`,
+    );
+    if (session === state.session && $("logs-dialog").open)
+      $("logs-content").textContent =
+        data.text || "No log lines were returned.";
+  } catch (error) {
+    if (session === state.session)
+      $("logs-content").textContent = error.message;
+  } finally {
+    $("logs-refresh").disabled = false;
+  }
+}
+$("logs-refresh").addEventListener("click", loadLogs);
+$("logs-container").addEventListener("change", loadLogs);
+
 navigate();
 setConnectedControls();
 resetWorkspace();
 checkService();
+checkAuthentication().then(restoreSession);

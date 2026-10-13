@@ -61,6 +61,33 @@
           >GPU inventory</a
         >
       </nav>
+      <nav aria-label="Operations navigation">
+        <a class="nav-item" href="#metrics" data-view="metrics"
+          ><svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+            aria-hidden="true"
+          >
+            <path d="M3 3v18h18M6 15l4-5 4 3 6-8" /></svg
+          >Live usage</a
+        >
+        <a class="nav-item" href="#kubernetes" data-view="kubernetes"
+          ><svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+            aria-hidden="true"
+          >
+            <rect x="7" y="2" width="10" height="5" rx="1" />
+            <rect x="2" y="17" width="7" height="5" rx="1" />
+            <rect x="15" y="17" width="7" height="5" rx="1" />
+            <path d="M12 7v5M5 17v-5h14v5" /></svg
+          >Kubernetes</a
+        >
+      </nav>
       <div class="sidebar-bottom">
         <a class="nav-item" href="/docs" target="_blank" rel="noopener"
           ><svg
@@ -86,6 +113,7 @@
         </div>
         <div class="topbar-actions">
           <span id="mode-badge" class="badge muted">Checking service</span
+          ><span id="user-label" class="user-label" hidden></span
           ><button
             id="connection-button"
             class="connection-button"
@@ -271,6 +299,117 @@
             </p>
           </div>
         </section>
+        <section id="metrics-view" hidden aria-labelledby="metrics-heading">
+          <div class="section-heading">
+            <div>
+              <h2 id="metrics-heading">Live inference usage</h2>
+              <p>
+                Prometheus telemetry for workloads in dynamo-workloads. Rates
+                use a two-minute window.
+              </p>
+            </div>
+            <label class="window-control"
+              >History<select id="metrics-window">
+                <option value="5">Last 5 minutes</option>
+                <option value="15" selected>Last 15 minutes</option>
+                <option value="60">Last hour</option>
+              </select></label
+            >
+          </div>
+          <div id="metrics-notice" class="notice muted-notice">
+            Sign in to view live usage.
+          </div>
+          <div id="usage-cards" class="usage-cards"></div>
+          <div class="chart-grid">
+            <article class="panel chart-panel">
+              <div class="panel-heading">
+                <div>
+                  <h2>Successful requests</h2>
+                  <p>Requests per second</p>
+                </div>
+                <span id="requests-chart-status" class="badge muted"
+                  >No data</span
+                >
+              </div>
+              <div id="requests-chart" class="usage-chart"></div>
+            </article>
+            <article class="panel chart-panel">
+              <div class="panel-heading">
+                <div>
+                  <h2>Output throughput</h2>
+                  <p>Generated tokens per second</p>
+                </div>
+                <span id="tokens-chart-status" class="badge muted"
+                  >No data</span
+                >
+              </div>
+              <div id="tokens-chart" class="usage-chart"></div>
+            </article>
+          </div>
+          <p id="metrics-updated" class="metrics-updated">
+            Values are shown only when monitoring returns a usable sample.
+          </p>
+        </section>
+        <section
+          id="kubernetes-view"
+          hidden
+          aria-labelledby="kubernetes-heading"
+        >
+          <div class="section-heading">
+            <div>
+              <h2 id="kubernetes-heading">Cluster nodes</h2>
+              <p>Node health and capacity from the Kubernetes API.</p>
+            </div>
+            <span class="badge muted">dynamo-workloads</span>
+          </div>
+          <div id="nodes-notice" class="notice muted-notice" hidden></div>
+          <div id="node-cards" class="node-cards"></div>
+          <div class="section-heading workload-heading">
+            <div>
+              <h2>Model operations</h2>
+              <p>
+                Inspect runtime pods and change replicas on managed workloads.
+              </p>
+            </div>
+            <label class="window-control"
+              >Deployment<select id="workload-select" disabled>
+                <option value="">Select a deployment</option>
+              </select></label
+            >
+          </div>
+          <div id="workload-notice" class="notice muted-notice">
+            Select a model deployment to inspect its workload.
+          </div>
+          <div id="component-controls" class="component-controls"></div>
+          <div class="panel pod-panel">
+            <div class="panel-heading">
+              <div>
+                <h2>
+                  Runtime pods <span id="pod-count" class="count">0</span>
+                </h2>
+                <p>Container health, restarts, and operational controls.</p>
+              </div>
+            </div>
+            <div class="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">POD / COMPONENT</th>
+                    <th scope="col">STATE</th>
+                    <th scope="col">NODE</th>
+                    <th scope="col">RESTARTS</th>
+                    <th scope="col" class="actions-column">ACTIONS</th>
+                  </tr>
+                </thead>
+                <tbody id="pod-rows"></tbody>
+              </table>
+            </div>
+            <div id="pod-empty" class="empty-state">
+              <h3>No runtime pods loaded</h3>
+              <p>Choose a deployment to inspect its pods.</p>
+            </div>
+          </div>
+        </section>
         <footer class="page-footer">
           <span>Inference control plane</span
           ><span>Model orchestration, at a glance.</span>
@@ -286,7 +425,7 @@
         <div class="modal-heading">
           <div>
             <div class="eyebrow">PLATFORM ACCESS</div>
-            <h2 id="connect-title">Connect to your workspace</h2>
+            <h2 id="connect-title">Sign in to your workspace</h2>
           </div>
           <button
             class="icon-button"
@@ -298,25 +437,53 @@
           </button>
         </div>
         <p class="modal-description">
-          Use your control plane API token to manage deployments and inspect
-          cluster capacity.
+          Sign in with your administrator account to manage models and
+          Kubernetes workloads.
         </p>
-        <label class="field"
-          >API token<input
-            id="api-token"
-            name="token"
-            type="password"
-            placeholder="Enter your bearer token"
-            autocomplete="off"
+        <div id="login-setup-notice" class="notice muted-notice" hidden>
+          Administrator sign-in has not been configured on this service.
+        </div>
+        <label class="field" id="username-field"
+          >Username<input
+            id="admin-username"
+            name="username"
+            autocomplete="username"
+            maxlength="128"
             required
+            placeholder="Administrator username"
         /></label>
-        <p class="field-help">
-          Your token stays in memory in this tab and is cleared when you
-          disconnect or reload.
+        <label class="field" id="password-field"
+          >Password<input
+            id="admin-password"
+            name="password"
+            type="password"
+            autocomplete="current-password"
+            maxlength="1024"
+            required
+            placeholder="Your password"
+        /></label>
+        <p class="field-help" id="login-session-help">
+          Your session expires automatically. Signing out revokes access for
+          this session.
         </p>
-        <div id="mock-login-hint" class="notice mock-notice" hidden>
-          For local mock mode, use <code>test-token</code> unless a custom token
-          is configured.
+        <div id="development-access" hidden>
+          <label class="field"
+            >API token<input
+              id="api-token"
+              name="token"
+              type="password"
+              placeholder="Enter your bearer token"
+              autocomplete="off"
+              required
+          /></label>
+          <p class="field-help">
+            Your token stays in memory in this tab and is cleared when you
+            disconnect or reload.
+          </p>
+          <div id="mock-login-hint" class="notice mock-notice" hidden>
+            For local mock mode, use <code>test-token</code> unless a custom
+            token is configured.
+          </div>
         </div>
         <p id="connect-error" class="form-error" role="alert" hidden></p>
         <div class="modal-footer">
@@ -327,7 +494,7 @@
           >
             Cancel</button
           ><button id="connect-submit" class="button primary" type="submit">
-            Connect to platform <span aria-hidden="true">→</span>
+            Sign in <span aria-hidden="true">→</span>
           </button>
         </div>
       </form>
@@ -524,6 +691,121 @@
           </button>
         </div>
       </form>
+    </dialog>
+    <dialog id="scale-dialog" class="modal" aria-labelledby="scale-title">
+      <form id="scale-form">
+        <div class="modal-heading">
+          <div>
+            <div class="eyebrow">WORKLOAD CAPACITY</div>
+            <h2 id="scale-title">Change replicas</h2>
+          </div>
+          <button
+            class="icon-button"
+            type="button"
+            data-close="scale-dialog"
+            aria-label="Close replica settings"
+          >
+            ×
+          </button>
+        </div>
+        <p id="scale-description" class="modal-description"></p>
+        <label class="field"
+          >Desired replicas<input
+            id="scale-replicas"
+            type="number"
+            min="1"
+            max="64"
+            step="1"
+            required
+        /></label>
+        <div class="notice muted-notice">
+          Changes are reconciled by Kubernetes. Scaling down can interrupt
+          requests on removed workers.
+        </div>
+        <p id="scale-error" class="form-error" role="alert" hidden></p>
+        <div class="modal-footer">
+          <button
+            class="button secondary"
+            type="button"
+            data-close="scale-dialog"
+          >
+            Cancel</button
+          ><button id="scale-submit" class="button primary" type="submit">
+            Apply replicas
+          </button>
+        </div>
+      </form>
+    </dialog>
+    <dialog
+      id="replacement-dialog"
+      class="modal"
+      aria-labelledby="replacement-title"
+    >
+      <form id="replacement-form">
+        <div class="modal-heading">
+          <div>
+            <div class="eyebrow">KUBERNETES OPERATION</div>
+            <h2 id="replacement-title">Replace this pod?</h2>
+          </div>
+          <button
+            class="icon-button"
+            type="button"
+            data-close="replacement-dialog"
+            aria-label="Close pod replacement confirmation"
+          >
+            ×
+          </button>
+        </div>
+        <p class="modal-description">
+          Request a replacement for <strong id="replacement-pod-name"></strong>.
+          Its controller will create a new pod.
+        </p>
+        <div class="notice error-notice">
+          Active requests may be interrupted. Kubernetes disruption budgets are
+          respected.
+        </div>
+        <p id="replacement-error" class="form-error" role="alert" hidden></p>
+        <div class="modal-footer">
+          <button
+            class="button secondary"
+            type="button"
+            data-close="replacement-dialog"
+          >
+            Keep pod</button
+          ><button id="replacement-submit" class="button danger" type="submit">
+            Replace pod
+          </button>
+        </div>
+      </form>
+    </dialog>
+    <dialog
+      id="logs-dialog"
+      class="modal logs-modal"
+      aria-labelledby="logs-title"
+    >
+      <div class="modal-heading">
+        <div>
+          <div class="eyebrow">CONTAINER LOGS</div>
+          <h2 id="logs-title">Pod logs</h2>
+        </div>
+        <button
+          class="icon-button"
+          type="button"
+          data-close="logs-dialog"
+          aria-label="Close container logs"
+        >
+          ×
+        </button>
+      </div>
+      <div class="logs-toolbar">
+        <label class="window-control"
+          >Container<select id="logs-container"></select></label
+        ><button id="logs-refresh" class="button secondary" type="button">
+          Refresh logs
+        </button>
+      </div>
+      <p class="field-help">Latest 100 lines, limited to 128 KB.</p>
+      <pre id="logs-content" class="logs-content" tabindex="0"></pre>
     </dialog>
     <div id="toast" class="toast" role="status" hidden></div>
   </body>

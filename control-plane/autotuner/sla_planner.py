@@ -78,8 +78,9 @@ class SLAPlanner:
         specs = self.inspector.inspect(request.model_id)
 
         # 2. Select primary GPU pool and determine available capacity
-        primary_pool = inventory.gpu_pools[0] if inventory.gpu_pools else GpuPool()
-        total_available_gpus = sum(p.available_count for p in inventory.gpu_pools)
+        primary_pool = max(inventory.gpu_pools, key=lambda pool: pool.available_count * pool.vram_gb) if inventory.gpu_pools else GpuPool(available_count=0)
+        # Workers are pinned to this GPU SKU; other pools cannot satisfy that selector.
+        total_available_gpus = primary_pool.available_count
 
         if total_available_gpus < 1:
             raise InsufficientCapacityError("Zero GPUs available in cluster.")

@@ -968,6 +968,209 @@ tbody tr:hover {
   font-size: 10px;
   line-height: 1.65;
 }
+.user-label {
+  font-size: 11px;
+  color: var(--muted);
+  max-width: 130px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.usage-cards {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+  margin: 22px 0;
+}
+.usage-card .stat-label {
+  line-height: 1.5;
+  display: block;
+  min-height: 28px;
+  letter-spacing: 0.5px;
+}
+.usage-card .stat-value {
+  font-size: 25px;
+  white-space: nowrap;
+}
+.window-control {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.window-control select {
+  background: white;
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 9px 11px;
+  max-width: 230px;
+}
+.chart-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px;
+}
+.usage-chart {
+  min-height: 230px;
+  padding: 0 13px 10px;
+}
+.usage-chart svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+.usage-chart svg text {
+  font-size: 11px;
+  fill: var(--muted);
+}
+.chart-gridline {
+  stroke: var(--line);
+  stroke-width: 1;
+}
+.chart-line {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+.chart-empty {
+  display: grid;
+  min-height: 210px;
+  place-items: center;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+.metrics-updated {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.7;
+  margin-top: 18px;
+}
+.node-cards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+.node-card .detail-grid {
+  margin-bottom: 0;
+}
+.node-card .detail-grid dd {
+  color: var(--ink);
+}
+.workload-heading {
+  margin-top: 30px;
+}
+.component-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin: 18px 0;
+}
+.component-card {
+  padding: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 15px;
+  flex-wrap: wrap;
+}
+.component-card h3 {
+  font-size: 14px;
+  font-weight: 600;
+}
+.component-card p {
+  color: var(--muted);
+  font-size: 11px;
+  margin: 8px 0;
+}
+.component-card .component-reason {
+  flex-basis: 100%;
+  margin: 0;
+}
+.pod-name {
+  font-size: 11px;
+  font-weight: 550;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.logs-modal {
+  width: 900px;
+}
+.logs-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 20px 0;
+}
+.logs-content {
+  min-height: 230px;
+  max-height: 55dvh;
+  padding: 18px;
+  background: #172b22;
+  color: #dcebe2;
+  border-radius: 7px;
+  font-size: 12px;
+  line-height: 1.8;
+  overflow: auto;
+}
+#login-setup-notice {
+  margin-bottom: 18px;
+}
+@media (max-width: 1100px) {
+  .usage-cards {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .chart-grid {
+    grid-template-columns: 1fr;
+  }
+  .component-controls {
+    grid-template-columns: 1fr;
+  }
+}
+@media (max-width: 700px) {
+  .node-cards {
+    grid-template-columns: 1fr;
+  }
+  .section-heading {
+    flex-wrap: wrap;
+    gap: 17px;
+  }
+  .section-heading p {
+    line-height: 1.7;
+  }
+  .workload-heading .window-control {
+    flex-basis: 100%;
+  }
+  .window-control select {
+    max-width: 220px;
+  }
+  .component-card {
+    padding: 17px;
+  }
+  .user-label {
+    display: none;
+  }
+  .sidebar > nav {
+    margin-bottom: 6px;
+  }
+  .sidebar > nav:last-of-type {
+    margin-bottom: 0;
+  }
+  .usage-card {
+    padding: 17px 13px;
+  }
+  .usage-card .stat-value {
+    font-size: 22px;
+  }
+  .logs-toolbar {
+    flex-wrap: wrap;
+  }
+}
 .eyebrow,
 .stat-label,
 .stat-caption,

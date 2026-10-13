@@ -358,55 +358,49 @@ class K8sClient:
                 field_selector="status.phase!=Failed,status.phase!=Succeeded"
             )
 
-            # Calculate total GPUs allocated to pods
-            allocated_gpus = 0
-            for pod in pods.items:
-                for c in pod.spec.containers:
-                    if c.resources and c.resources.requests:
-                        gpu_req = c.resources.requests.get("nvidia.com/gpu", "0")
-                        try:
-                            allocated_gpus += int(gpu_req)
-                        except ValueError:
-                            pass
+            return inventory_from_nodes(nodes.items, pods.items)
 
-            total_gpus = 0
-            gpu_product = "NVIDIA-H100-80GB"
-            gpu_memory = 80.0
-            rdma_active = True
 
-            for node in nodes.items:
-                labels = node.metadata.labels or {}
-                allocatable = node.status.allocatable or {}
+def inventory_from_nodes(nodes: list[Any], pods: list[Any]) -> dict[str, Any]:
+    """Keep GPU pools separate and exclude unschedulable capacity."""
+    allocated: dict[str, int] = {}
 
-                # Read GPU Feature Discovery labels
-                product = labels.get("nvidia.com/gpu.product")
-                memory_mb = labels.get("nvidia.com/gpu.memory")
-                if product:
-                    gpu_product = product
-                if memory_mb:
-                    try:
-                        gpu_memory = round(float(memory_mb) / 1024, 1)
-                    except ValueError:
-                        pass
+    def requested(container) -> int:
+        resources = container.resources
+        if not resources:
+            return 0
+        value = (resources.requests or {}).get("nvidia.com/gpu")
+        if value is None:
+            value = (resources.limits or {}).get("nvidia.com/gpu", 0)
+        return int(value)
 
-                gpu_str = allocatable.get("nvidia.com/gpu", "0")
-                try:
-                    total_gpus += int(gpu_str)
-                except ValueError:
-                    pass
+    for pod in pods:
+        if not pod.spec.node_name or pod.status.phase in ("Failed", "Succeeded"):
+            continue
+        application = sum(requested(container) for container in pod.spec.containers)
+        initialization = max((requested(container) for container in pod.spec.init_containers or []), default=0)
+        count = max(application, initialization) + int((pod.spec.overhead or {}).get("nvidia.com/gpu", 0))
+        allocated[pod.spec.node_name] = allocated.get(pod.spec.node_name, 0) + count
 
-            available_gpus = max(0, total_gpus - allocated_gpus)
-
-            return {
-                "nodes_count": len(nodes.items),
-                "gpu_pools": [
-                    {
-                        "gpu_sku": gpu_product,
-                        "vram_gb": gpu_memory,
-                        "total_count": total_gpus,
-                        "available_count": available_gpus,
-                        "rdma_supported": rdma_active,
-                    }
-                ],
-                "rdma_network_active": rdma_active,
-            }
+    pools: dict[tuple, dict[str, Any]] = {}
+    for node in nodes:
+        labels = node.metadata.labels or {}
+        resources = node.status.allocatable or {}
+        count = int(resources.get("nvidia.com/gpu", 0))
+        if count <= 0:
+            continue
+        product = labels.get("nvidia.com/gpu.product", "Unknown GPU")
+        memory_label = labels.get("nvidia.com/gpu.memory")
+        try:
+            memory = round(float(memory_label) / 1024, 1) if memory_label else None
+        except ValueError:
+            memory = None
+        rdma = any("rdma" in resource.lower() and float(value) > 0 for resource, value in resources.items())
+        ready = any(condition.type == "Ready" and condition.status == "True" for condition in node.status.conditions or [])
+        schedulable = ready and not node.spec.unschedulable
+        key = (product, memory, rdma)
+        pool = pools.setdefault(key, {"gpu_sku": product, "vram_gb": memory, "total_count": 0, "available_count": 0, "rdma_supported": rdma})
+        pool["total_count"] += count
+        if schedulable:
+            pool["available_count"] += max(0, count - allocated.get(node.metadata.name, 0))
+    return {"nodes_count": len(nodes), "gpu_pools": list(pools.values()), "rdma_network_active": any(pool["rdma_supported"] and pool["available_count"] for pool in pools.values())}

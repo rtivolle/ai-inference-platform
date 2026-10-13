@@ -6,6 +6,9 @@ Le pipeline de déploiement vers plusieurs clusters Kubernetes indépendants est
 documenté dans [deploy/README.md](deploy/README.md) : images immuables publiées une
 fois, secrets propres à chaque cluster, validation et vérification des rollouts.
 
+La documentation complète (guides d'installation, architecture, API, opérations)
+se trouve dans [docs/](docs/README.md).
+
 ---
 
 ## Console Web
