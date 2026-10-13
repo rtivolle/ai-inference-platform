@@ -8,6 +8,20 @@ Ce document définit l'architecture organisationnelle, les contrats d'interface,
 
 Historique du dépôt : `2a782cc` (livraison initiale du squelette vagues 1–3) → `8759dd9` (remédiation R1–R4 sur défauts D1–D12) → arbre de travail actuel (ajouts majeurs : pipeline multi-clusters, console web, RBAC runtime). Les vagues 4 et 5 (cluster bare-metal réel & validation E2E non-mockée) n'ont pas encore été exécutées.
 
+### Mise à jour R5 (2026-10-13)
+
+Le checkpoint des ajouts pipeline, passerelle et console web est le commit
+`75c34a2`. Les défauts D3, D13 et D14 sont corrigés dans le code : DGD v1beta1
+et NIXL, cycle KEDA complet, Jobs warmer épinglés par hostname avec attente
+bloquante sur tous les nœuds et placement des workers sur ces mêmes nœuds.
+Le contrat local rejette désormais les anciens champs synthétiques.
+
+L'environnement `.venv` utilise Python 3.11.17. La CI ajoute kubeconform v0.7.0
+avec les CRDs officiels versionnés ; 35 ressources statiques et rendues sont
+validées sans erreur ni schéma ignoré. D11 reste partiel : Kind et les tests
+sur cluster/GPU réels des vagues 4–5 restent à exécuter. Les constats historiques
+ci-dessous décrivent l'état avant R5.
+
 ### 1. Synthèse Exécutive
 
 | Dimension | Statut | Commentaire |

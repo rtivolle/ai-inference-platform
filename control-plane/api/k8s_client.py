@@ -8,6 +8,9 @@ import logging
 import os
 from typing import Any
 
+from .k8s_controls import component_specs, gpu_per_replica
+from .metrics import UsageMetrics
+
 logger = logging.getLogger("k8s_client")
 
 try:
@@ -22,7 +25,7 @@ except ImportError:
 
 class K8sClient:
     DGD_GROUP = "nvidia.com"
-    DGD_VERSION = "v1alpha1"
+    DGD_VERSION = "v1beta1"
     DGD_PLURAL = "dynamographdeployments"
 
     def __init__(self, in_cluster: bool = False, mock_mode: bool | None = None):
@@ -40,7 +43,11 @@ class K8sClient:
         self._initialized = False
         self._mock_resources: dict[str, dict[str, Any]] = {}
         self._mock_endpoint_slices: dict[str, bool] = {}
+        self._mock_scaled_objects: dict[tuple[str, str], dict[str, Any]] = {}
         self.in_cluster = is_in_cluster
+        self.metrics = UsageMetrics()
+        self._control_lock = asyncio.Lock()
+        self._mock_restarts: dict[str, int] = {}
 
     async def initialize(self):
         if self._initialized:
@@ -168,6 +175,67 @@ class K8sClient:
                     return False
                 raise
 
+    async def apply_scaled_object(
+        self, manifest_dict: dict[str, Any], namespace: str = "dynamo-workloads"
+    ) -> dict[str, Any]:
+        await self.initialize()
+        name = manifest_dict["metadata"]["name"]
+        if self.mock_mode:
+            self._mock_scaled_objects[(namespace, name)] = manifest_dict
+            return manifest_dict
+        async with client.ApiClient() as api:
+            custom_api = client.CustomObjectsApi(api)
+            args: dict[str, Any] = {"group": "keda.sh", "version": "v1alpha1", "namespace": namespace, "plural": "scaledobjects"}
+            try:
+                await custom_api.get_namespaced_custom_object(**args, name=name)
+            except ApiException as exc:
+                if exc.status != 404:
+                    raise
+                return await custom_api.create_namespaced_custom_object(**args, body=manifest_dict)
+            return await custom_api.patch_namespaced_custom_object(**args, name=name, body=manifest_dict)
+
+    async def delete_scaled_object(self, name: str, namespace: str = "dynamo-workloads") -> bool:
+        await self.initialize()
+        if self.mock_mode:
+            return self._mock_scaled_objects.pop((namespace, name), None) is not None
+        async with client.ApiClient() as api:
+            try:
+                await client.CustomObjectsApi(api).delete_namespaced_custom_object(
+                    group="keda.sh", version="v1alpha1", namespace=namespace, plural="scaledobjects", name=name
+                )
+                return True
+            except ApiException as exc:
+                if exc.status == 404:
+                    return False
+                raise
+
+    async def get_target_gpu_nodes(self, plan: dict[str, Any]) -> list[str]:
+        """Select Ready, schedulable GPU hostnames for both warming and serving."""
+        await self.initialize()
+        if self.mock_mode:
+            return [plan["target_node"]] if plan.get("target_node") else ["mock-gpu-0", "mock-gpu-1"]
+        cliques = [plan[key] for key in ("worker_clique", "prefill_clique", "decode_clique") if key in plan]
+        async with client.ApiClient() as api:
+            nodes = await client.CoreV1Api(api).list_node()
+        targets = []
+        for node in nodes.items:
+            labels = node.metadata.labels or {}
+            hostname = labels.get("kubernetes.io/hostname")
+            if not hostname or node.spec.unschedulable:
+                continue
+            if plan.get("target_node") and hostname != plan["target_node"]:
+                continue
+            if not any(condition.type == "Ready" and condition.status == "True" for condition in node.status.conditions or []):
+                continue
+            gpu_count = int((node.status.allocatable or {}).get("nvidia.com/gpu", "0"))
+            if any(
+                labels.get("nvidia.com/gpu.product") == clique.get("gpu_sku")
+                and gpu_count >= clique["tensor_parallel_size"] * clique.get("pipeline_parallel_size", 1)
+                for clique in cliques
+            ):
+                targets.append(hostname)
+        return sorted(set(targets))
+
     async def apply_job(self, manifest_dict: dict[str, Any], namespace: str = "dynamo-workloads") -> Any:
         await self.initialize()
         name = manifest_dict["metadata"]["name"]
@@ -180,8 +248,9 @@ class K8sClient:
             try:
                 await batch_api.delete_namespaced_job(name=name, namespace=namespace, propagation_policy="Background")
                 await asyncio.sleep(1)
-            except ApiException:
-                pass
+            except ApiException as exc:
+                if exc.status != 404:
+                    raise
             res = await batch_api.create_namespaced_job(namespace=namespace, body=manifest_dict)  # type: ignore[arg-type]
             return res
 
@@ -198,28 +267,31 @@ class K8sClient:
             poll_interval = 5
             elapsed = 0
             while elapsed < timeout_seconds:
-                try:
-                    job = await batch_api.read_namespaced_job_status(name=job_name, namespace=namespace)
-                    if job.status.succeeded and job.status.succeeded > 0:
-                        logger.info(f"Warmer Job {job_name} succeeded.")
-                        return True
-                    if job.status.failed and job.status.failed > 2:
-                        logger.error(f"Warmer Job {job_name} failed.")
-                        return False
-                except Exception as e:
-                    logger.warning(f"Error reading job status {job_name}: {e}")
+                job = await batch_api.read_namespaced_job_status(name=job_name, namespace=namespace)
+                conditions = job.status.conditions or []
+                if any(condition.type == "Failed" and condition.status == "True" for condition in conditions):
+                    raise RuntimeError(f"Warmer Job {job_name} failed.")
+                if any(condition.type == "Complete" and condition.status == "True" for condition in conditions):
+                    return True
+                if (job.status.succeeded or 0) >= (job.spec.completions or 1):
+                    logger.info(f"Warmer Job {job_name} succeeded.")
+                    return True
                 await asyncio.sleep(poll_interval)
                 elapsed += poll_interval
 
             raise TimeoutError(f"Warmer Job {job_name} timed out after {timeout_seconds} seconds.")
 
     async def get_running_requests_count(self, model_name: str) -> int:
-        """Queries running requests from Prometheus or metrics endpoints; returns 0 if none or mock."""
+        """Verify active requests from Prometheus; unavailable monitoring is an error."""
         await self.initialize()
         if self.mock_mode:
             return 0
-        # In live cluster, could query Prometheus vllm:num_requests_running; fallback to 0
-        return 0
+        deployment = await self.get_dynamo_deployment(model_name)
+        model_id = (deployment.get("metadata", {}).get("annotations", {}).get("inference.platform/model-id")
+                    or deployment.get("spec", {}).get("model")) if deployment else None
+        if not model_id:
+            raise RuntimeError("The model ID cannot be resolved for a drain check.")
+        return await self.metrics.running_requests(model_id)
 
     async def is_endpoint_slice_ready(self, service_name: str, namespace: str = "dynamo-workloads") -> bool:
         await self.initialize()
@@ -248,6 +320,11 @@ class K8sClient:
         """
         await self.initialize()
         if self.mock_mode:
+            allocated = sum(
+                int(service.get("replicas", 0)) * gpu_per_replica(service)
+                for resource in self._mock_resources.values()
+                for service in component_specs(resource).values()
+            )
             return {
                 "nodes_count": 2,
                 "gpu_pools": [
@@ -255,7 +332,7 @@ class K8sClient:
                         "gpu_sku": "NVIDIA-H100-80GB",
                         "vram_gb": 80.0,
                         "total_count": 8,
-                        "available_count": 8,
+                        "available_count": max(0, 8 - allocated),
                         "rdma_supported": True,
                     }
                 ],

@@ -7,67 +7,30 @@ Adheres to R1, R2, R3 specifications:
 - Model not found mapped to HTTP 404 (D9).
 """
 
-import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from autotuner.hf_inspector import ModelNotFoundError
 from autotuner.sla_planner import ClusterInventory, DeployRequest, SLAPlanner
 from autotuner.vram_calculator import InsufficientCapacityError
-from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Security, status
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, status
 from fastapi.responses import FileResponse
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
+from api.auth import router as auth_router
+from api.auth import verify_auth
 from api.dynamo_reconciler import DynamoReconciler
 from api.k8s_client import K8sClient
 from api.litellm_sync import LiteLLMSync
+from api.metrics import UsageMetrics
 
 # Shared clients
 k8s_client = K8sClient()
 litellm_sync = LiteLLMSync()
 reconciler = DynamoReconciler(k8s_client=k8s_client, litellm_sync=litellm_sync)
 sla_planner = SLAPlanner()
-
-# Security & Authentication (D7 fix)
-security_bearer = HTTPBearer(auto_error=False)
-
-
-async def verify_auth(
-    credentials: HTTPAuthorizationCredentials | None = Security(security_bearer),
-    cf_jwt: str | None = Header(None, alias="Cf-Access-Jwt-Assertion"),
-    cf_client_id: str | None = Header(None, alias="CF-Access-Client-Id"),
-    cf_client_secret: str | None = Header(None, alias="CF-Access-Client-Secret"),
-):
-    """
-    Enforces authentication on all /api/v1/* routes via:
-    1. Cloudflare Access JWT or Service Token headers
-    2. Bearer API Token
-    """
-    valid_token = os.environ.get("CONTROL_PLANE_API_TOKEN")
-    is_mock = os.environ.get("CONTROL_PLANE_MOCK", "0") in ("1", "true", "True")
-
-    # If mock mode is active and no token configured, allow a default test token
-    if is_mock and not valid_token:
-        valid_token = "test-token"
-
-    # Check Cloudflare Access Service Token
-    if cf_client_id and cf_client_secret:
-        return {"auth": "cloudflare_access_service_token", "client_id": cf_client_id}
-
-    # Check Cloudflare Access JWT
-    if cf_jwt:
-        return {"auth": "cloudflare_access_jwt"}
-
-    # Check Bearer Token
-    if credentials and valid_token and credentials.credentials == valid_token:
-        return {"auth": "bearer_token"}
-
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Unauthorized: Valid Bearer token or Cloudflare Access headers required.",
-    )
+usage_metrics = UsageMetrics()
 
 
 @asynccontextmanager
@@ -84,6 +47,7 @@ app = FastAPI(
     description="Automated VRAM sizing, NVIDIA Dynamo disaggregated workload management, and LiteLLM gateway synchronization.",
     lifespan=lifespan,
 )
+app.include_router(auth_router)
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 app.mount("/assets", StaticFiles(directory=WEB_DIR), name="web-assets")
@@ -110,6 +74,13 @@ async def get_cluster_gpus():
     return inventory
 
 
+@app.get("/api/v1/metrics/usage", tags=["Monitoring"], dependencies=[Depends(verify_auth)])
+async def get_usage_metrics(window_minutes: int = Query(15, ge=5, le=60)):
+    if window_minutes not in (5, 15, 60):
+        raise HTTPException(422, "Metrics window must be 5, 15, or 60 minutes.")
+    return await usage_metrics.snapshot(window_minutes)
+
+
 @app.post(
     "/api/v1/models/deploy", tags=["Deployments"], status_code=status.HTTP_200_OK, dependencies=[Depends(verify_auth)]
 )
@@ -123,13 +94,13 @@ async def deploy_model(request: DeployRequest):
         plan = await run_in_threadpool(sla_planner.plan, request, inventory)
 
         # 3. Reconcile deployment: warmer Job -> DGD -> EndpointSlice watcher -> LiteLLM sync
-        await reconciler.deploy_model(plan)
+        reconcile_result = await reconciler.deploy_model(plan)
 
         return {
             "status": "provisioning",
             "deployment_name": plan["deployment_name"],
             "model_id": plan["model_id"],
-            "plan": plan,
+            "plan": reconcile_result["plan"],
         }
     except InsufficientCapacityError as e:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))

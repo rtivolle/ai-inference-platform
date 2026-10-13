@@ -2,48 +2,219 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nvidia.com/schemas/dynamo_crd.schema.json",
   "title": "DynamoGraphDeploymentCRD",
-  "description": "Validation schema for NVIDIA DynamoGraphDeployment Custom Resource (supporting v1alpha1 and v1beta1)",
+  "description": "Platform contract for NVIDIA Dynamo v1.5.1 v1beta1. CI additionally validates against the upstream CRD.",
   "type": "object",
-  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "additionalProperties": false,
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "spec"
+  ],
   "properties": {
     "apiVersion": {
-      "type": "string",
-      "enum": ["nvidia.com/v1alpha1", "nvidia.com/v1beta1"]
+      "const": "nvidia.com/v1beta1"
     },
     "kind": {
-      "type": "string",
       "const": "DynamoGraphDeployment"
     },
     "metadata": {
       "type": "object",
-      "required": ["name"],
+      "required": [
+        "name",
+        "annotations"
+      ],
       "properties": {
-        "name": { "type": "string" },
-        "namespace": { "type": "string" },
-        "labels": { "type": "object" },
-        "annotations": { "type": "object" }
+        "name": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "labels": {
+          "type": "object"
+        },
+        "annotations": {
+          "type": "object",
+          "required": [
+            "inference.platform/model-id"
+          ],
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
       }
     },
     "spec": {
       "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "backendFramework",
+        "components"
+      ],
       "properties": {
-        "backend": { "type": "string" },
-        "backendFramework": { "type": "string" },
-        "model": { "type": "string" },
-        "sharedStorage": { "type": "object" },
-        "services": { "type": "object" },
+        "backendFramework": {
+          "const": "vllm"
+        },
         "components": {
           "type": "array",
+          "minItems": 2,
+          "maxItems": 3,
           "items": {
             "type": "object",
-            "required": ["name", "type", "replicas"],
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "type",
+              "replicas",
+              "podTemplate"
+            ],
             "properties": {
-              "name": { "type": "string" },
-              "type": { "type": "string", "enum": ["frontend", "worker", "prefill", "decode", "planner", "EPP"] },
-              "replicas": { "type": "integer", "minimum": 1 },
-              "podTemplate": { "type": "object" }
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "type": {
+                "enum": [
+                  "frontend",
+                  "worker",
+                  "prefill",
+                  "decode"
+                ]
+              },
+              "replicas": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "scalingAdapter": {
+                "type": "object",
+                "additionalProperties": false
+              },
+              "podTemplate": {
+                "type": "object",
+                "required": [
+                  "spec"
+                ],
+                "properties": {
+                  "spec": {
+                    "type": "object",
+                    "required": [
+                      "containers"
+                    ],
+                    "properties": {
+                      "containers": {
+                        "type": "array",
+                        "minItems": 1,
+                        "contains": {
+                          "type": "object",
+                          "required": [
+                            "name",
+                            "image",
+                            "command"
+                          ],
+                          "properties": {
+                            "name": {
+                              "const": "main"
+                            },
+                            "image": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "command": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
+                            },
+                            "args": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "type": {
+                      "const": "frontend"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "podTemplate": {
+                      "properties": {
+                        "spec": {
+                          "properties": {
+                            "containers": {
+                              "contains": {
+                                "properties": {
+                                  "command": {
+                                    "const": [
+                                      "python3",
+                                      "-m",
+                                      "dynamo.frontend"
+                                    ]
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                "else": {
+                  "properties": {
+                    "podTemplate": {
+                      "properties": {
+                        "spec": {
+                          "properties": {
+                            "containers": {
+                              "contains": {
+                                "required": [
+                                  "args",
+                                  "resources"
+                                ],
+                                "properties": {
+                                  "command": {
+                                    "const": [
+                                      "python3",
+                                      "-m",
+                                      "dynamo.vllm"
+                                    ]
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "contains": {
+            "properties": {
+              "type": {
+                "const": "frontend"
+              }
             }
-          }
+          },
+          "minContains": 1,
+          "maxContains": 1
         }
       }
     }

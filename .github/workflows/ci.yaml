@@ -26,11 +26,11 @@ jobs:
 
       - name: Run Ruff Lint Check
         run: |
-          ruff check control-plane/ loader/ tests/ scripts/deploy_clusters.py scripts/install_litellm.py
+          ruff check control-plane/ loader/ tests/ scripts/deploy_clusters.py scripts/install_litellm.py scripts/validate_manifests.py
 
       - name: Run Mypy Type Check
         run: |
-          mypy --ignore-missing-imports control-plane/ loader/ scripts/deploy_clusters.py scripts/install_litellm.py
+          mypy --ignore-missing-imports control-plane/ loader/ scripts/deploy_clusters.py scripts/install_litellm.py scripts/validate_manifests.py
 
   contracts-and-scripts:
     name: Shellcheck & Contracts Validation
@@ -45,11 +45,24 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install jsonschema pyyaml shellcheck-py
+          pip install -e ".[dev]" shellcheck-py
 
       - name: Run shellcheck on scripts
         run: |
           shellcheck scripts/*.sh
+
+      - name: Install kubeconform
+        env:
+          KUBECONFORM_VERSION: v0.7.0
+        run: |
+          curl -fsSLO "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          curl -fsSLO "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/CHECKSUMS"
+          awk '$2 == "kubeconform-linux-amd64.tar.gz"' CHECKSUMS | sha256sum --check --strict
+          tar -xzf kubeconform-linux-amd64.tar.gz kubeconform
+          sudo install kubeconform /usr/local/bin/kubeconform
+
+      - name: Validate infrastructure and rendered manifests
+        run: python -m scripts.validate_manifests
 
       - name: Validate JSON schemas
         run: |

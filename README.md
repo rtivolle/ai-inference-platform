@@ -141,3 +141,47 @@ pytest -v tests/
 Voir le [guide LiteLLM](gateway/README.md) pour installer la passerelle, créer les
 secrets partagés avec le control plane et configurer automatiquement PostgreSQL
 persistant et l’enregistrement dynamique des modèles.
+
+
+## Remédiation R5 et validation avant cluster
+
+Les templates ciblent NVIDIA Dynamo **v1.5.1**, `nvidia.com/v1beta1` et
+`spec.components`. Le frontend lance `dynamo.frontend` avec routage KV ; les
+workers lancent `python3 -m dynamo.vllm`. La désagrégation utilise
+`NixlConnector` avec `--disaggregation-mode` et des événements KV côté prefill.
+Les workers RDMA demandent `rdma/rdma_shared_device` et la capacité `IPC_LOCK` ;
+le device plugin du Network Operator doit exposer cette ressource.
+
+`DYNAMO_RUNTIME_IMAGE` permet de fournir une image compatible, idéalement par
+digest, et `DYNAMO_RUNTIME_IMAGE_PULL_SECRET` configure le secret de registre.
+`MODEL_WARMER_IMAGE` et `MODEL_WARMER_IMAGE_PULL_SECRET` configurent le warmer.
+
+Le réconciliateur découvre les nœuds GPU Ready, non cordonnés, avec le SKU et
+la capacité par pod requis. Il crée un Job épinglé à chaque hostname et attend
+**toutes** les complétions avant de créer le DGD. Les workers sont limités à ces
+mêmes hostnames. Les échecs et timeouts du warmer bloquent le déploiement.
+Un nouveau nœud ne rejoint pas ce périmètre automatiquement : redéployer le
+modèle pour préchauffer le cache et actualiser les hostnames autorisés.
+
+Les composants prefill/decode activent `scalingAdapter: {}`. Le réconciliateur
+applique leurs deux ScaledObjects KEDA après le DGD, puis les supprime après
+retrait LiteLLM et drain, avant suppression du DGD. Le control plane doit
+recevoir le RBAC actualisé dans `infra/control-plane-rbac.yaml`. Son image
+inclut désormais les templates `monitoring/`.
+
+Utiliser Python 3.11 comme en CI :
+
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -e '.[dev]' shellcheck-py
+CONTROL_PLANE_MOCK=1 pytest -v tests/
+python -m scripts.validate_manifests --kubeconform /path/to/kubeconform
+```
+
+Le validateur utilise kubeconform v0.7.0 et Kubernetes 1.31.0. Il contrôle les
+manifestes `infra/` et `gateway/` et les rendus DGD, warmer et KEDA contre les
+CRDs officiels versionnés Dynamo v1.5.1, KEDA v2.16.1 et Network Operator
+v24.7.0, sans ignorer les schémas manquants. Les fichiers Helm values et les
+configurations sans GVK sont exclus. La validation Kind, le bootstrap réel et
+les tests GPU/SSE de charge et chaos restent à exécuter dans les vagues 4–5.

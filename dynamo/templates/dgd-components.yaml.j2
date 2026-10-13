@@ -1,0 +1,142 @@
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: {{ deployment_name | tojson }}
+  namespace: {{ namespace | default('dynamo-workloads') | tojson }}
+  annotations:
+    inference.platform/model-id: {{ model_id | tojson }}
+  labels:
+    app.kubernetes.io/name: {{ deployment_name | tojson }}
+    app.kubernetes.io/managed-by: dynamo-control-plane
+    dynamo.nvidia.com/serving-mode: {{ serving_mode | default('aggregated') }}
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: {{ frontend_replicas | default(2) }}
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: {{ dynamo_image | tojson }}
+              command: [python3, -m, dynamo.frontend]
+              env:
+                - name: DYN_ROUTER_MODE
+                  value: kv
+{% if dynamo_image_pull_secret %}
+          imagePullSecrets:
+            - name: {{ dynamo_image_pull_secret | tojson }}
+{% endif %}
+{% for role, clique in worker_components %}
+    - name: {{ role }}
+      type: {{ role }}
+      replicas: {{ clique.replicas }}
+{% if role in ['prefill', 'decode'] %}
+      scalingAdapter: {}
+{% endif %}
+      podTemplate:
+        metadata:
+          labels:
+            dynamo_component: {{ role }}
+        spec:
+{% if target_node_names %}
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: kubernetes.io/hostname
+                        operator: In
+                        values: {{ target_node_names | tojson }}
+                      - key: nvidia.com/gpu.product
+                        operator: In
+                        values: [{{ clique.gpu_sku | tojson }}]
+{% elif target_node %}
+          nodeSelector:
+            kubernetes.io/hostname: {{ target_node | tojson }}
+{% else %}
+          nodeSelector:
+            nvidia.com/gpu.product: {{ clique.gpu_sku | tojson }}
+{% endif %}
+{% if dynamo_image_pull_secret %}
+          imagePullSecrets:
+            - name: {{ dynamo_image_pull_secret | tojson }}
+{% endif %}
+          containers:
+            - name: main
+              image: {{ dynamo_image | tojson }}
+              command: [python3, -m, dynamo.vllm]
+              args:
+                - --model
+                - {{ model_id | tojson }}
+                - "--tensor-parallel-size={{ clique.tensor_parallel_size }}"
+{% if clique.pipeline_parallel_size | default(1) > 1 %}
+                - "--pipeline-parallel-size={{ clique.pipeline_parallel_size }}"
+{% endif %}
+                - "--dtype={{ dtype }}"
+{% if quantization %}
+                - "--quantization={{ quantization }}"
+{% endif %}
+                - "--max-model-len={{ max_model_len }}"
+                - "--gpu-memory-utilization={{ gpu_memory_utilization }}"
+{% if clique.max_num_batched_tokens %}
+                - "--max-num-batched-tokens={{ clique.max_num_batched_tokens }}"
+{% endif %}
+{% if clique.enable_chunked_prefill %}
+                - --enable-chunked-prefill
+{% endif %}
+{% if clique.max_num_seqs %}
+                - "--max-num-seqs={{ clique.max_num_seqs }}"
+{% endif %}
+                - --download-dir=/mnt/nvme/model-cache
+{% if role in ['prefill', 'decode'] %}
+                - --disaggregation-mode
+                - {{ role }}
+                - --kv-transfer-config
+                - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+{% endif %}
+{% if role != 'decode' %}
+                - --kv-events-config
+                - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
+{% endif %}
+              env:
+                - name: HF_HOME
+                  value: /mnt/nvme/model-cache
+                - name: HF_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: hf-token-secret
+                      key: token
+                      optional: true
+{% if kv_cache_transfer.protocol == 'rdma' %}
+              securityContext:
+                capabilities:
+                  add: [IPC_LOCK]
+{% endif %}
+              resources:
+                requests:
+                  nvidia.com/gpu: {{ clique.tensor_parallel_size * (clique.pipeline_parallel_size | default(1)) }}
+{% if kv_cache_transfer.protocol == 'rdma' %}
+                  rdma/rdma_shared_device: 1
+{% endif %}
+                limits:
+                  nvidia.com/gpu: {{ clique.tensor_parallel_size * (clique.pipeline_parallel_size | default(1)) }}
+{% if kv_cache_transfer.protocol == 'rdma' %}
+                  rdma/rdma_shared_device: 1
+{% endif %}
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /mnt/nvme/model-cache
+                - name: shm
+                  mountPath: /dev/shm
+          volumes:
+            - name: model-cache
+              hostPath:
+                path: /mnt/nvme/model-cache
+                type: Directory
+            - name: shm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 16Gi
+{% endfor %}

@@ -1,12 +1,14 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: "{{ deployment_name }}-warmer"
+  name: {{ warmer_job_name | tojson }}
   namespace: "{{ namespace | default('dynamo-workloads') }}"
   labels:
     app.kubernetes.io/name: "{{ deployment_name }}-warmer"
     app.kubernetes.io/component: model-cache-warmer
 spec:
+  completions: 1
+  parallelism: 1
   backoffLimit: 2
   ttlSecondsAfterFinished: 600
   template:
@@ -14,7 +16,7 @@ spec:
       labels:
         app.kubernetes.io/name: "{{ deployment_name }}-warmer"
     spec:
-      restartPolicy: OnFailure
+      restartPolicy: Never
       {% if warmer_image_pull_secret %}
       imagePullSecrets:
         - name: "{{ warmer_image_pull_secret }}"
@@ -29,7 +31,7 @@ spec:
           imagePullPolicy: IfNotPresent
           args:
             - "--model-id"
-            - "{{ model_id }}"
+            - {{ model_id | tojson }}
             - "--cache-dir"
             - "/mnt/nvme/model-cache"
           env:

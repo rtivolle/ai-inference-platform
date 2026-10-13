@@ -8,6 +8,7 @@ Dynamo Reconciler adhering to R1, R2, and R3:
 """
 
 import asyncio
+import hashlib
 import logging
 import os
 from typing import Any
@@ -21,6 +22,7 @@ from .litellm_sync import LiteLLMSync
 logger = logging.getLogger("dynamo_reconciler")
 
 TEMPLATES_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../dynamo/templates"))
+MONITORING_TEMPLATES_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../monitoring"))
 LOADER_TEMPLATES_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../loader"))
 
 
@@ -40,7 +42,7 @@ class DynamoReconciler:
         self._in_memory_cache: dict[str, dict[str, Any]] = {}
 
         self.jinja_env = Environment(
-            loader=FileSystemLoader([templates_dir, LOADER_TEMPLATES_DIR]),
+            loader=FileSystemLoader([templates_dir, LOADER_TEMPLATES_DIR, MONITORING_TEMPLATES_DIR]),
             trim_blocks=True,
             lstrip_blocks=True,
             autoescape=False,
@@ -56,7 +58,7 @@ class DynamoReconciler:
                 if name:
                     self._in_memory_cache[name] = {
                         "name": name,
-                        "model_id": item.get("spec", {}).get("model", ""),
+                        "model_id": self._model_id(item),
                         "status": "running",
                         "ready": True,
                         "source": "cluster_cr",
@@ -72,14 +74,27 @@ class DynamoReconciler:
 
         template = self.jinja_env.get_template(template_name)
         context = {**plan, "namespace": namespace}
+        context["worker_components"] = (
+            [("prefill", plan["prefill_clique"]), ("decode", plan["decode_clique"])]
+            if serving_mode == "disaggregated" else [("worker", plan["worker_clique"])]
+        )
+        context["dynamo_image"] = os.environ.get(
+            "DYNAMO_RUNTIME_IMAGE", plan.get("dynamo_image", "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.1")
+        )
+        context["dynamo_image_pull_secret"] = os.environ.get(
+            "DYNAMO_RUNTIME_IMAGE_PULL_SECRET", plan.get("dynamo_image_pull_secret", "")
+        )
         rendered_yaml = template.render(context)
         parsed_dict = yaml.safe_load(rendered_yaml)
         return parsed_dict
 
     def render_warmer_job(self, plan: dict[str, Any], namespace: str = "dynamo-workloads") -> dict[str, Any]:
-        """Renders the model warmer Job from loader/warmer-job.yaml.j2 (D6 fix)."""
+        """Render a cache warmer pinned to one GPU hostname."""
         template = self.jinja_env.get_template("warmer-job.yaml.j2")
         context = {**plan, "namespace": namespace}
+        node = plan.get("target_node", "")
+        suffix = f"-{hashlib.sha256(node.encode()).hexdigest()[:10]}" if node else ""
+        context["warmer_job_name"] = f"{plan['deployment_name'][:45]}-warmer{suffix}"
         if os.environ.get("MODEL_WARMER_IMAGE"):
             context["warmer_image"] = os.environ["MODEL_WARMER_IMAGE"]
         if os.environ.get("MODEL_WARMER_IMAGE_PULL_SECRET"):
@@ -87,23 +102,41 @@ class DynamoReconciler:
         rendered_yaml = template.render(context)
         return yaml.safe_load(rendered_yaml)
 
+    @staticmethod
+    def _model_id(cr: dict[str, Any]) -> str:
+        return cr.get("metadata", {}).get("annotations", {}).get("inference.platform/model-id", "")
+
+    def render_scaled_objects(self, plan: dict[str, Any], namespace: str = "dynamo-workloads") -> list[dict[str, Any]]:
+        if plan.get("serving_mode") != "disaggregated":
+            return []
+        template = self.jinja_env.get_template("keda-scaledobjects.yaml.j2")
+        rendered = template.render({**plan, "namespace": namespace})
+        return [document for document in yaml.safe_load_all(rendered) if document]
+
     async def deploy_model(self, plan: dict[str, Any], namespace: str = "dynamo-workloads") -> dict[str, Any]:
         deployment_name = plan["deployment_name"]
         logger.info(f"Reconciling deployment {deployment_name} in {namespace}...")
 
-        # 1. Launch & await NVMe warmer Job before applying CRD (D6 fix)
-        try:
-            warmer_manifest = self.render_warmer_job(plan, namespace)
-            await self.k8s.apply_job(warmer_manifest, namespace)
-            logger.info(f"Awaiting NVMe pre-cache completion for {deployment_name}...")
-            # In mock mode, completes immediately; in cluster awaits Job completion
-            await self.k8s.wait_for_job_completion(f"{deployment_name}-warmer", namespace, timeout_seconds=1800)
-        except Exception as e:
-            logger.warning(f"Warmer job execution note for {deployment_name}: {e}")
+        # Discover all eligible hosts, then pin one Job to each. Worker scheduling is
+        # restricted to this same set so every node-local cache is ready before startup.
+        target_nodes = await self.k8s.get_target_gpu_nodes(plan)
+        if not target_nodes:
+            raise RuntimeError("No eligible GPU nodes found for model cache warming.")
+        plan = {**plan, "target_node_names": target_nodes}
+        jobs = [self.render_warmer_job({**plan, "target_node": node}, namespace) for node in target_nodes]
+        for job in jobs:
+            await self.k8s.apply_job(job, namespace)
+        completed = await asyncio.gather(*(
+            self.k8s.wait_for_job_completion(job["metadata"]["name"], namespace, timeout_seconds=1800)
+            for job in jobs
+        ))
+        if not all(completed):
+            raise RuntimeError(f"Model cache warming failed for {deployment_name}.")
 
-        # 2. Render & Apply DynamoGraphDeployment Custom Resource
         manifest = self.render_manifest(plan, namespace)
         await self.k8s.apply_dynamo_deployment(manifest, namespace)
+        for scaled_object in self.render_scaled_objects(plan, namespace):
+            await self.k8s.apply_scaled_object(scaled_object, namespace)
 
         self._in_memory_cache[deployment_name] = {
             "name": deployment_name,
@@ -186,6 +219,11 @@ class DynamoReconciler:
             await asyncio.sleep(poll_step)
             drain_elapsed += poll_step
 
+        # Remove external autoscalers before deleting the operator-owned graph.
+        # Deterministic names allow cleanup even after a control-plane restart.
+        for role in ("prefill", "decode"):
+            await self.k8s.delete_scaled_object(f"{deployment_name}-{role}-scaler", namespace)
+
         # 3. K8s CRD deletion
         deleted = await self.k8s.delete_dynamo_deployment(deployment_name, namespace)
         self._in_memory_cache.pop(deployment_name, None)
@@ -201,7 +239,7 @@ class DynamoReconciler:
             cached = self._in_memory_cache.get(deployment_name, {})
             return {
                 "name": deployment_name,
-                "model_id": cr.get("spec", {}).get("model", cached.get("model_id")),
+                "model_id": self._model_id(cr) or cached.get("model_id"),
                 "namespace": cr.get("metadata", {}).get("namespace", namespace),
                 "serving_mode": cr.get("metadata", {}).get("labels", {}).get("dynamo.nvidia.com/serving-mode"),
                 "plan": cached.get("plan"),
@@ -221,7 +259,7 @@ class DynamoReconciler:
             results.append(
                 {
                     "name": name,
-                    "model_id": cr.get("spec", {}).get("model", cached.get("model_id")),
+                    "model_id": self._model_id(cr) or cached.get("model_id"),
                     "serving_mode": cr.get("metadata", {}).get("labels", {}).get("dynamo.nvidia.com/serving-mode"),
                     "status": cached.get("status", "running"),
                     "ready": cached.get("ready", True),

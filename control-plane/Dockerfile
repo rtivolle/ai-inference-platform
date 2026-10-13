@@ -19,6 +19,7 @@ COPY control-plane/api/ /app/api/
 COPY contracts/ /contracts/
 COPY dynamo/templates/ /dynamo/templates/
 COPY loader/ /loader/
+COPY monitoring/ /monitoring/
 
 EXPOSE 8000
 

@@ -50,31 +50,30 @@ def test_render_disaggregated_crd(reconciler, crd_schema):
     # 1. Validate structure against CRD schema (Contract 2)
     jsonschema.validate(instance=manifest, schema=crd_schema)
 
-    # 2. Assert key fields
-    assert manifest["apiVersion"] == "nvidia.com/v1alpha1"
-    assert manifest["kind"] == "DynamoGraphDeployment"
-    assert manifest["metadata"]["name"] == "llama-3-3-70b"
-    assert manifest["spec"]["backend"] == "vllm"
-    assert manifest["spec"]["model"] == "meta-llama/Llama-3.3-70B-Instruct"
-    assert manifest["spec"]["sharedStorage"]["hostPath"] == "/mnt/nvme/model-cache"
-
-    services = manifest["spec"]["services"]
-    assert "Frontend" in services
-    assert services["Frontend"]["replicas"] == 2
-    assert services["Frontend"]["ports"][0]["port"] == 8000
-
-    assert "PrefillWorker" in services
-    assert services["PrefillWorker"]["replicas"] == 2
-    assert services["PrefillWorker"]["resources"]["limits"]["nvidia.com/gpu"] == 4
-    assert "--tensor-parallel-size=4" in services["PrefillWorker"]["extraArgs"]
-    assert "--dtype=bfloat16" in services["PrefillWorker"]["extraArgs"]
-    assert "--quantization=fp8" in services["PrefillWorker"]["extraArgs"]
-
-    assert "DecodeWorker" in services
-    assert services["DecodeWorker"]["replicas"] == 4
-    assert services["DecodeWorker"]["resources"]["limits"]["nvidia.com/gpu"] == 2
-    assert "--tensor-parallel-size=2" in services["DecodeWorker"]["extraArgs"]
-    assert "--dtype=bfloat16" in services["DecodeWorker"]["extraArgs"]
+    assert manifest["apiVersion"] == "nvidia.com/v1beta1"
+    assert manifest["metadata"]["annotations"]["inference.platform/model-id"] == sample_plan["model_id"]
+    assert manifest["spec"]["backendFramework"] == "vllm"
+    components = {component["type"]: component for component in manifest["spec"]["components"]}
+    frontend = components["frontend"]["podTemplate"]["spec"]["containers"][0]
+    assert {"name": "DYN_ROUTER_MODE", "value": "kv"} in frontend["env"]
+    for role, tp in (("prefill", 4), ("decode", 2)):
+        component = components[role]
+        assert component["scalingAdapter"] == {}
+        container = component["podTemplate"]["spec"]["containers"][0]
+        assert container["name"] == "main"
+        assert container["command"] == ["python3", "-m", "dynamo.vllm"]
+        assert container["resources"]["limits"]["nvidia.com/gpu"] == tp
+        args = container["args"]
+        assert f"--tensor-parallel-size={tp}" in args
+        assert "--dtype=bfloat16" in args
+        assert "--quantization=fp8" in args
+        assert args[args.index("--disaggregation-mode") + 1] == role
+        assert json.loads(args[args.index("--kv-transfer-config") + 1]) == {
+            "kv_connector": "NixlConnector", "kv_role": "kv_both",
+        }
+        assert "IPC_LOCK" in container["securityContext"]["capabilities"]["add"]
+    args = components["prefill"]["podTemplate"]["spec"]["containers"][0]["args"]
+    assert json.loads(args[args.index("--kv-events-config") + 1])["enable_kv_cache_events"] is True
 
 
 def test_render_aggregated_crd(reconciler, crd_schema):
@@ -105,12 +104,32 @@ def test_render_aggregated_crd(reconciler, crd_schema):
     # Validate schema
     jsonschema.validate(instance=manifest, schema=crd_schema)
 
-    assert manifest["spec"]["model"] == "meta-llama/Meta-Llama-3-8B-Instruct"
-    services = manifest["spec"]["services"]
-    assert "Worker" in services
-    assert services["Worker"]["replicas"] == 2
-    assert services["Worker"]["resources"]["limits"]["nvidia.com/gpu"] == 1
-    assert "--tensor-parallel-size=1" in services["Worker"]["extraArgs"]
-    assert "--dtype=bfloat16" in services["Worker"]["extraArgs"]
-    # Ensure no --quantization argument is emitted when quantization is None
-    assert not any("--quantization" in arg for arg in services["Worker"]["extraArgs"])
+    assert manifest["metadata"]["annotations"]["inference.platform/model-id"] == sample_plan["model_id"]
+    worker = next(component for component in manifest["spec"]["components"] if component["type"] == "worker")
+    assert worker["replicas"] == 2
+    assert "scalingAdapter" not in worker
+    container = worker["podTemplate"]["spec"]["containers"][0]
+    assert container["resources"]["limits"]["nvidia.com/gpu"] == 1
+    assert "--tensor-parallel-size=1" in container["args"]
+    assert "--dtype=bfloat16" in container["args"]
+    assert not any("--quantization" in arg for arg in container["args"])
+    assert "--disaggregation-mode" not in container["args"]
+    assert "securityContext" not in container
+
+
+@pytest.mark.parametrize("legacy_spec", [
+    {"backend": "vllm", "services": {}},
+    {"backendFramework": "vllm", "components": []},
+    {"backendFramework": "vllm", "components": [{"name": "worker", "type": "worker", "replicas": 1}]},
+])
+def test_contract_rejects_legacy_and_incomplete_graphs(crd_schema, legacy_spec):
+    manifest = {
+        "apiVersion": "nvidia.com/v1beta1", "kind": "DynamoGraphDeployment",
+        "metadata": {"name": "test", "annotations": {"inference.platform/model-id": "example/model"}},
+        "spec": legacy_spec,
+    }
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(manifest, crd_schema)
+    manifest["apiVersion"] = "nvidia.com/v1alpha1"
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(manifest, crd_schema)
