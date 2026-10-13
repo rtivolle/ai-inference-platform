@@ -7,7 +7,7 @@ SLA Planner adhering to Contract 1 (R1/R2 specifications):
 """
 
 import re
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -33,14 +33,14 @@ def sanitize_deployment_name(model_id: str) -> str:
 
 
 class DeployRequest(BaseModel):
-    model_id: str
+    model_id: str = Field(min_length=1, max_length=256, pattern=r"^\S+$")
     deployment_name: str | None = None
-    profile: str = "balanced"  # "low-latency", "high-throughput", "balanced"
-    dtype: str = "auto"
-    quantization: str | None = None  # None, "fp8", "awq", "gptq"
-    max_model_len: int = 32768
-    gpu_memory_utilization: float = 0.90
-    target_concurrency: int = 16
+    profile: Literal["low-latency", "high-throughput", "balanced"] = "balanced"
+    dtype: Literal["auto", "bfloat16", "float16", "bf16", "fp16"] = "auto"
+    quantization: Literal["fp8", "awq", "gptq"] | None = None
+    max_model_len: int = Field(default=32768, gt=0)
+    gpu_memory_utilization: float = Field(default=0.90, gt=0, le=1)
+    target_concurrency: int = Field(default=16, gt=0)
 
     @field_validator("deployment_name")
     def validate_name(cls, v):

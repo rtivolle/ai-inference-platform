@@ -28,7 +28,15 @@ spec:
             - name: LITELLM_PROXY_URL
               value: "http://litellm-service.ai-gateway.svc.cluster.local:4000"
             - name: LITELLM_MASTER_KEY
-              value: "sk-internal-litellm-master-key"
+              valueFrom:
+                secretKeyRef:
+                  name: inference-runtime
+                  key: litellm-master-key
+            - name: CONTROL_PLANE_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: inference-runtime
+                  key: api-token
           ports:
             - name: http
               containerPort: 8000

@@ -1,0 +1,6 @@
+{
+  "clusters": [
+    {"name": "cluster-a", "context": "cluster-a", "environment": "cluster-a"},
+    {"name": "cluster-b", "context": "cluster-b", "environment": "cluster-b"}
+  ]
+}

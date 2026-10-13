@@ -1,0 +1,57 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: control-plane
+  namespace: dynamo-control-plane
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: control-plane
+  namespace: dynamo-workloads
+rules:
+  - apiGroups: [nvidia.com]
+    resources: [dynamographdeployments]
+    verbs: [get, list, create, patch, delete]
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, create, delete]
+  - apiGroups: [discovery.k8s.io]
+    resources: [endpointslices]
+    verbs: [list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: control-plane
+  namespace: dynamo-workloads
+subjects:
+  - kind: ServiceAccount
+    name: control-plane
+    namespace: dynamo-control-plane
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: control-plane
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: inference-control-plane-inventory
+rules:
+  - apiGroups: [""]
+    resources: [nodes, pods]
+    verbs: [list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: inference-control-plane-inventory
+subjects:
+  - kind: ServiceAccount
+    name: control-plane
+    namespace: dynamo-control-plane
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: inference-control-plane-inventory

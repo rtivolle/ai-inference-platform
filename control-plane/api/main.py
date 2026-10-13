@@ -9,12 +9,16 @@ Adheres to R1, R2, R3 specifications:
 
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from autotuner.hf_inspector import ModelNotFoundError
 from autotuner.sla_planner import ClusterInventory, DeployRequest, SLAPlanner
 from autotuner.vram_calculator import InsufficientCapacityError
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Security, status
+from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 
 from api.dynamo_reconciler import DynamoReconciler
 from api.k8s_client import K8sClient
@@ -81,10 +85,18 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+WEB_DIR = Path(__file__).resolve().parent / "web"
+app.mount("/assets", StaticFiles(directory=WEB_DIR), name="web-assets")
+
+
+@app.get("/", include_in_schema=False)
+async def web_console():
+    return FileResponse(WEB_DIR / "index.html", headers={"Cache-Control": "no-store"})
+
 
 @app.get("/health", tags=["Monitoring"])
 async def health():
-    return {"status": "ok", "service": "control-plane-api"}
+    return {"status": "ok", "service": "control-plane-api", "mode": "mock" if k8s_client.mock_mode else "live"}
 
 
 @app.get("/health/readiness", tags=["Monitoring"])
@@ -108,7 +120,7 @@ async def deploy_model(request: DeployRequest):
         inventory = ClusterInventory(**inventory_dict)
 
         # 2. Compute Auto-Tuned deployment plan (Contract 1)
-        plan = sla_planner.plan(request, inventory)
+        plan = await run_in_threadpool(sla_planner.plan, request, inventory)
 
         # 3. Reconcile deployment: warmer Job -> DGD -> EndpointSlice watcher -> LiteLLM sync
         await reconciler.deploy_model(plan)

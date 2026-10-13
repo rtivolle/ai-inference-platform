@@ -16,6 +16,7 @@ CLOUDFLARE_NAMESPACE="cloudflare"
 INGRESS_NAMESPACE="ingress-nginx"
 GPU_NAMESPACE="gpu-operator"
 NETWORK_NAMESPACE="network-operator"
+REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 
 log() {
     echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] [BOOTSTRAP] $*"
@@ -142,6 +143,14 @@ main() {
     deploy_storage_and_crds
     deploy_gpu_and_network_operators
     deploy_ingress_and_cloudflare
+    if [[ -n "${LITELLM_IMAGE:-}" ]]; then
+        log "Installing LiteLLM with persistent model configuration..."
+        (cd "${REPO_ROOT}" && "${PYTHON_BIN:-python3}" -m scripts.install_litellm \
+            --context "${LITELLM_KUBE_CONTEXT:-$(kubectl config current-context)}" \
+            --image "${LITELLM_IMAGE}")
+    else
+        log "Set LITELLM_IMAGE to a tested image digest to install LiteLLM during bootstrap."
+    fi
     log "=== AI Inference Cluster Bootstrap Completed Successfully ==="
 }
 

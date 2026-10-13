@@ -1,0 +1,160 @@
+name: Deploy Independent Clusters
+
+on:
+  workflow_dispatch:
+    inputs:
+      inventory:
+        description: Committed cluster inventory path
+        required: true
+        default: deploy/clusters.example.json
+      cluster:
+        description: Cluster name or all
+        required: true
+        default: all
+      gateway_image:
+        description: LiteLLM image (repository@sha256:digest)
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.inventory.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -e '.[dev]' shellcheck-py
+      - name: Quality gates
+        run: |
+          shellcheck scripts/*.sh
+          ruff check control-plane/ loader/ tests/ scripts/deploy_clusters.py scripts/install_litellm.py
+          mypy --ignore-missing-imports control-plane/ loader/ scripts/deploy_clusters.py scripts/install_litellm.py
+          CONTROL_PLANE_MOCK=1 pytest -v tests/
+          python -c "import jsonschema, json; [jsonschema.Draft202012Validator.check_schema(json.load(open(f))) for f in ['contracts/model_spec.schema.json', 'contracts/dynamo_crd.schema.json']]"
+      - name: Validate targets and gateway digest
+        id: inventory
+        env:
+          INVENTORY: ${{ inputs.inventory }}
+          CLUSTER: ${{ inputs.cluster }}
+          GATEWAY_IMAGE: ${{ inputs.gateway_image }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          from scripts.deploy_clusters import immutable_image, load_clusters
+          immutable_image(os.environ['GATEWAY_IMAGE'])
+          clusters = load_clusters(Path(os.environ['INVENTORY']), os.environ['CLUSTER'])
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('matrix=' + json.dumps({'include': clusters}) + '\n')
+          PY
+
+  build:
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      control_image: ${{ steps.images.outputs.control_image }}
+      loader_image: ${{ steps.images.outputs.loader_image }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Registry image names
+        id: names
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          repo="${REPOSITORY,,}"
+          echo "control=ghcr.io/${repo}/control-plane" >> "$GITHUB_OUTPUT"
+          echo "loader=ghcr.io/${repo}/model-warmer" >> "$GITHUB_OUTPUT"
+      - name: Publish control plane
+        id: control
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: control-plane/Dockerfile
+          push: true
+          tags: ${{ steps.names.outputs.control }}:${{ github.sha }}
+      - name: Publish model warmer
+        id: loader
+        uses: docker/build-push-action@v6
+        with:
+          context: loader
+          push: true
+          tags: ${{ steps.names.outputs.loader }}:${{ github.sha }}
+      - name: Record immutable images
+        id: images
+        env:
+          CONTROL_IMAGE: ${{ steps.names.outputs.control }}@${{ steps.control.outputs.digest }}
+          LOADER_IMAGE: ${{ steps.names.outputs.loader }}@${{ steps.loader.outputs.digest }}
+        run: |
+          echo "control_image=${CONTROL_IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "loader_image=${LOADER_IMAGE}" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: [validate, build]
+    runs-on: ${{ vars.DEPLOY_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix: ${{ fromJSON(needs.validate.outputs.matrix) }}
+    environment: ${{ matrix.environment }}
+    concurrency:
+      group: inference-deploy-${{ matrix.name }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install pyyaml
+      - name: Check kubectl version configuration
+        env:
+          KUBECTL_VERSION: ${{ vars.KUBECTL_VERSION }}
+        run: test -n "$KUBECTL_VERSION"
+      - uses: azure/setup-kubectl@v4
+        with:
+          version: ${{ vars.KUBECTL_VERSION }}
+      - name: Configure cluster access
+        env:
+          CLUSTER_KUBECONFIG: ${{ secrets.KUBECONFIG }}
+        run: |
+          test -n "$CLUSTER_KUBECONFIG"
+          umask 077
+          printf '%s' "$CLUSTER_KUBECONFIG" > "$RUNNER_TEMP/cluster.kubeconfig"
+          echo "KUBECONFIG=$RUNNER_TEMP/cluster.kubeconfig" >> "$GITHUB_ENV"
+      - name: Render and deploy release
+        env:
+          INVENTORY: ${{ inputs.inventory }}
+          CLUSTER: ${{ matrix.name }}
+          CONTROL_IMAGE: ${{ needs.build.outputs.control_image }}
+          LOADER_IMAGE: ${{ needs.build.outputs.loader_image }}
+          GATEWAY_IMAGE: ${{ inputs.gateway_image }}
+        run: |
+          python scripts/deploy_clusters.py \
+            --inventory "$INVENTORY" --cluster "$CLUSTER" \
+            --control-image "$CONTROL_IMAGE" --loader-image "$LOADER_IMAGE" \
+            --gateway-image "$GATEWAY_IMAGE" --apply
+      - name: Save release manifests and image digests
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.name }}-${{ github.sha }}
+          path: release/
+          if-no-files-found: ignore
+      - name: Remove cluster credentials
+        if: always()
+        run: rm -f "$RUNNER_TEMP/cluster.kubeconfig"

@@ -35,6 +35,9 @@ api = "control-plane/api"
 [tool.setuptools.packages.find]
 where = ["control-plane"]
 
+[tool.setuptools.package-data]
+api = ["web/*.html", "web/*.css", "web/*.js"]
+
 [tool.pytest.ini_options]
 python_files = ["test_*.py", "e2e_*.py", "*_test.py"]
 asyncio_mode = "auto"

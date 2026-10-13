@@ -11,15 +11,24 @@ metadata:
 data:
   config.yaml: |
     model_list: []
+
     litellm_settings:
       drop_params: true
+      set_verbose: false
+      telemetry: false
       request_timeout: 600
+
     general_settings:
-      master_key: "sk-internal-litellm-master-key"
-      database_url: "postgresql://litellm:litellm_secret@postgres-service.ai-gateway.svc.cluster.local:5432/litellm"
+      master_key: "os.environ/LITELLM_MASTER_KEY"
+      database_url: "os.environ/DATABASE_URL"
+      store_model_in_db: true
+
+    router_settings:
+      routing_strategy: "least-busy"
+      model_group_alias: {}
 ---
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: postgres
   namespace: ai-gateway
@@ -42,9 +51,42 @@ spec:
             - name: POSTGRES_USER
               value: litellm
             - name: POSTGRES_PASSWORD
-              value: litellm_secret
+              valueFrom:
+                secretKeyRef:
+                  name: inference-runtime
+                  key: postgres-password
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
           ports:
             - containerPort: 5432
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - litellm
+                - -d
+                - litellm
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+  serviceName: postgres-service
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 10Gi
 ---
 apiVersion: v1
 kind: Service
@@ -77,19 +119,34 @@ spec:
     spec:
       containers:
         - name: litellm-proxy
-          image: ghcr.io/berriai/litellm:main-latest
+          image: ghcr.io/berriai/litellm:main-stable
           args:
             - --config
             - /etc/litellm/config.yaml
             - --port
-            - "4000"
+            - '4000'
             - --num_workers
-            - "4"
+            - '1'
           env:
             - name: LITELLM_MASTER_KEY
-              value: "sk-internal-litellm-master-key"
+              valueFrom:
+                secretKeyRef:
+                  name: inference-runtime
+                  key: litellm-master-key
             - name: DATABASE_URL
-              value: "postgresql://litellm:litellm_secret@postgres-service.ai-gateway.svc.cluster.local:5432/litellm"
+              valueFrom:
+                secretKeyRef:
+                  name: inference-runtime
+                  key: database-url
+            - name: LITELLM_SALT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: inference-runtime
+                  key: litellm-salt-key
+            - name: STORE_MODEL_IN_DB
+              value: 'True'
+            - name: PROXY_CONFIG_RELOAD_INTERVAL_SECONDS
+              value: '10'
           ports:
             - name: http
               containerPort: 4000
@@ -109,6 +166,18 @@ spec:
               port: 4000
             initialDelaySeconds: 15
             periodSeconds: 10
+          startupProbe:
+            httpGet:
+              path: /health/liveliness
+              port: 4000
+            periodSeconds: 10
+            failureThreshold: 60
+          resources:
+            requests:
+              cpu: '1'
+              memory: 4Gi
+            limits:
+              memory: 4Gi
       volumes:
         - name: config
           configMap:

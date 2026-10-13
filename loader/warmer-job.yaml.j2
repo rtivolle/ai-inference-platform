@@ -15,6 +15,10 @@ spec:
         app.kubernetes.io/name: "{{ deployment_name }}-warmer"
     spec:
       restartPolicy: OnFailure
+      {% if warmer_image_pull_secret %}
+      imagePullSecrets:
+        - name: "{{ warmer_image_pull_secret }}"
+      {% endif %}
       {% if target_node %}
       nodeSelector:
         kubernetes.io/hostname: "{{ target_node }}"

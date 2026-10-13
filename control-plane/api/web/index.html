@@ -1,0 +1,530 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#162622" />
+    <meta
+      name="description"
+      content="Manage AI model deployments and GPU capacity on your inference platform."
+    />
+    <title>Inference — Control plane</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/assets/styles.css" />
+    <script src="/assets/app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <aside class="sidebar">
+      <a class="brand" href="#deployments"
+        ><span class="brand-name"
+          >inference<span class="brand-dot">.</span></span
+        ><span class="brand-caption">PLATFORM CONSOLE</span></a
+      >
+      <div class="workspace">
+        <span class="workspace-icon" aria-hidden="true">IP</span>
+        <div>Inference platform<small>Control plane</small></div>
+      </div>
+      <div class="nav-label">WORKSPACE</div>
+      <nav aria-label="Main navigation">
+        <a
+          class="nav-item active"
+          href="#deployments"
+          data-view="deployments"
+          aria-current="page"
+          ><svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+            aria-hidden="true"
+          >
+            <rect x="3" y="3" width="7" height="7" rx="1.5" />
+            <rect x="14" y="3" width="7" height="7" rx="1.5" />
+            <rect x="3" y="14" width="7" height="7" rx="1.5" />
+            <rect x="14" y="14" width="7" height="7" rx="1.5" /></svg
+          >Model deployments<span id="nav-count" class="nav-count">—</span></a
+        >
+        <a class="nav-item" href="#gpus" data-view="gpus"
+          ><svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+            aria-hidden="true"
+          >
+            <rect x="6" y="6" width="12" height="12" rx="2" />
+            <rect x="9" y="9" width="6" height="6" rx="1" />
+            <path
+              d="M9 3v3m6-3v3M9 18v3m6-3v3M3 9h3m-3 6h3m12-6h3m-3 6h3"
+            /></svg
+          >GPU inventory</a
+        >
+      </nav>
+      <div class="sidebar-bottom">
+        <a class="nav-item" href="/docs" target="_blank" rel="noopener"
+          ><svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+            aria-hidden="true"
+          >
+            <path d="m8 8-4 4 4 4m8-8 4 4-4 4m-3-11-2 14" /></svg
+          >API reference<span aria-hidden="true">↗</span></a
+        >
+        <div class="stack-note">
+          Powered by NVIDIA Dynamo<br /><span>Kubernetes · LiteLLM</span>
+        </div>
+      </div>
+    </aside>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="breadcrumb">
+          Workspace <span aria-hidden="true">/</span>
+          <span id="breadcrumb-view">Model deployments</span>
+        </div>
+        <div class="topbar-actions">
+          <span id="mode-badge" class="badge muted">Checking service</span
+          ><button
+            id="connection-button"
+            class="connection-button"
+            type="button"
+          >
+            <span id="connection-dot" class="status-dot"></span
+            ><span id="connection-label">Connect</span>
+          </button>
+        </div>
+      </header>
+      <main id="main" tabindex="-1">
+        <div id="mock-notice" class="notice mock-notice" hidden>
+          <span class="notice-icon" aria-hidden="true">i</span>
+          <div>
+            <strong>Mock environment</strong> Deployments and GPU inventory are
+            simulated. No real GPU workloads are started.
+          </div>
+        </div>
+        <div
+          id="error-notice"
+          class="notice error-notice"
+          role="alert"
+          hidden
+        ></div>
+        <section class="page-heading">
+          <div>
+            <div class="eyebrow">INFERENCE WORKSPACE</div>
+            <h1 id="page-title">Model deployments</h1>
+            <p id="page-description">
+              Deploy, monitor, and manage your inference workloads.
+            </p>
+          </div>
+          <div class="heading-actions">
+            <button
+              id="refresh-button"
+              class="button secondary"
+              type="button"
+              disabled
+            >
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.6"
+                aria-hidden="true"
+              >
+                <path
+                  d="M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 12-1l2 3M4 15l2 3a7 7 0 0 0 12-1"
+                /></svg
+              >Refresh</button
+            ><button
+              id="new-deployment-button"
+              class="button primary"
+              type="button"
+              disabled
+            >
+              <span aria-hidden="true">+</span> Deploy model
+            </button>
+          </div>
+        </section>
+        <section class="stats" aria-label="Workspace summary">
+          <article class="stat-card">
+            <span class="stat-label">DEPLOYMENTS</span>
+            <div id="stat-deployments" class="stat-value">—</div>
+            <span class="stat-caption">Managed model workloads</span>
+          </article>
+          <article class="stat-card">
+            <span class="stat-label">READY MODELS</span>
+            <div id="stat-ready" class="stat-value">—</div>
+            <span class="stat-caption"
+              ><span class="status-dot green"></span> Ready for inference</span
+            >
+          </article>
+          <article class="stat-card">
+            <span class="stat-label">AVAILABLE GPUs</span>
+            <div class="stat-value">
+              <span id="stat-available">—</span
+              ><span id="stat-total" class="stat-denominator"></span>
+            </div>
+            <span class="stat-caption">Unallocated cluster capacity</span>
+          </article>
+          <article class="stat-card">
+            <span class="stat-label">CLUSTER NODES</span>
+            <div id="stat-nodes" class="stat-value">—</div>
+            <span id="stat-network" class="stat-caption"
+              >Cluster inventory</span
+            >
+          </article>
+        </section>
+        <section
+          id="deployments-view"
+          class="panel"
+          aria-labelledby="deployments-heading"
+        >
+          <div class="panel-heading">
+            <div>
+              <h2 id="deployments-heading">
+                Your deployments
+                <span id="deployment-count" class="count">0</span>
+              </h2>
+              <p>Model workloads managed by the control plane.</p>
+            </div>
+            <span class="live-label"
+              ><span class="status-dot" id="sync-dot"></span
+              ><span id="sync-label">Not connected</span></span
+            >
+          </div>
+          <div class="table-toolbar">
+            <label class="search"
+              ><svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.7"
+                aria-hidden="true"
+              >
+                <circle cx="10.5" cy="10.5" r="6.5" />
+                <path d="m16 16 4 4" /></svg
+              ><input
+                id="model-search"
+                type="search"
+                placeholder="Search by model or deployment…"
+                aria-label="Search deployments"
+                disabled /></label
+            ><select
+              id="status-filter"
+              aria-label="Filter deployments by status"
+              disabled
+            >
+              <option value="all">All statuses</option>
+              <option value="ready">Ready</option>
+              <option value="provisioning">Provisioning</option>
+              <option value="failed">Needs attention</option>
+            </select>
+          </div>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">MODEL / DEPLOYMENT</th>
+                  <th scope="col">STATUS</th>
+                  <th scope="col">SERVING MODE</th>
+                  <th scope="col" class="actions-column">ACTIONS</th>
+                </tr>
+              </thead>
+              <tbody id="deployment-rows"></tbody>
+            </table>
+          </div>
+          <div id="empty-state" class="empty-state">
+            <div class="empty-icon" aria-hidden="true">◇</div>
+            <h3 id="empty-title">Connect to your control plane</h3>
+            <p id="empty-description">
+              Enter your API token to view models and GPU capacity.
+            </p>
+            <button id="empty-action" class="button secondary" type="button">
+              Connect to platform
+            </button>
+          </div>
+          <div class="panel-footer">
+            <span id="results-caption">No data loaded</span
+            ><span id="last-updated">Updates every 10 seconds</span>
+          </div>
+        </section>
+        <section id="gpus-view" hidden aria-labelledby="gpus-heading">
+          <div class="section-heading">
+            <div>
+              <h2 id="gpus-heading">GPU pools</h2>
+              <p>Allocatable capacity reported by Kubernetes.</p>
+            </div>
+            <span class="badge muted">GPU inventory</span>
+          </div>
+          <div id="gpu-pools" class="gpu-pools"></div>
+          <div id="gpu-empty" class="panel empty-state">
+            <div class="empty-icon" aria-hidden="true">▦</div>
+            <h3>GPU inventory unavailable</h3>
+            <p>Connect to your control plane to inspect GPU pools.</p>
+          </div>
+          <div class="capacity-note">
+            <span class="notice-icon" aria-hidden="true">i</span>
+            <p>
+              Available capacity is based on GPU allocations. Memory usage and
+              compute utilization require separate monitoring.
+            </p>
+          </div>
+        </section>
+        <footer class="page-footer">
+          <span>Inference control plane</span
+          ><span>Model orchestration, at a glance.</span>
+        </footer>
+      </main>
+    </div>
+    <dialog
+      id="connect-dialog"
+      class="modal connect-modal"
+      aria-labelledby="connect-title"
+    >
+      <form id="connect-form">
+        <div class="modal-heading">
+          <div>
+            <div class="eyebrow">PLATFORM ACCESS</div>
+            <h2 id="connect-title">Connect to your workspace</h2>
+          </div>
+          <button
+            class="icon-button"
+            type="button"
+            data-close="connect-dialog"
+            aria-label="Close connection dialog"
+          >
+            ×
+          </button>
+        </div>
+        <p class="modal-description">
+          Use your control plane API token to manage deployments and inspect
+          cluster capacity.
+        </p>
+        <label class="field"
+          >API token<input
+            id="api-token"
+            name="token"
+            type="password"
+            placeholder="Enter your bearer token"
+            autocomplete="off"
+            required
+        /></label>
+        <p class="field-help">
+          Your token stays in memory in this tab and is cleared when you
+          disconnect or reload.
+        </p>
+        <div id="mock-login-hint" class="notice mock-notice" hidden>
+          For local mock mode, use <code>test-token</code> unless a custom token
+          is configured.
+        </div>
+        <p id="connect-error" class="form-error" role="alert" hidden></p>
+        <div class="modal-footer">
+          <button
+            class="button secondary"
+            type="button"
+            data-close="connect-dialog"
+          >
+            Cancel</button
+          ><button id="connect-submit" class="button primary" type="submit">
+            Connect to platform <span aria-hidden="true">→</span>
+          </button>
+        </div>
+      </form>
+    </dialog>
+    <dialog
+      id="deploy-dialog"
+      class="modal deploy-modal"
+      aria-labelledby="deploy-title"
+    >
+      <form id="deploy-form">
+        <div class="modal-heading">
+          <div>
+            <div class="eyebrow">NEW WORKLOAD</div>
+            <h2 id="deploy-title">Deploy a model</h2>
+          </div>
+          <button
+            class="icon-button"
+            type="button"
+            data-close="deploy-dialog"
+            aria-label="Close deployment dialog"
+          >
+            ×
+          </button>
+        </div>
+        <p class="modal-description">
+          Choose a Hugging Face model. The auto-tuner selects parallelism and
+          serving mode from your cluster capacity.
+        </p>
+        <div class="form-section">
+          <h3>Model configuration</h3>
+          <label class="field"
+            >Hugging Face model ID<input
+              name="model_id"
+              id="deploy-model-id"
+              placeholder="meta-llama/Llama-3.3-70B-Instruct"
+              maxlength="256"
+              pattern="\S+"
+              required
+              list="model-suggestions" /></label
+          ><datalist id="model-suggestions">
+            <option value="meta-llama/Llama-3.3-70B-Instruct"></option>
+            <option value="meta-llama/Meta-Llama-3-8B-Instruct"></option>
+            <option value="mistralai/Mistral-7B-Instruct-v0.3"></option>
+            <option value="Qwen/Qwen2.5-72B-Instruct"></option></datalist
+          ><label class="field"
+            >Deployment name <span class="optional">optional</span
+            ><input
+              name="deployment_name"
+              placeholder="Auto-generated from model ID"
+              maxlength="63"
+              pattern="[a-z]([a-z0-9\-]{0,61}[a-z0-9])?"
+          /></label>
+          <p class="field-help">
+            Lowercase letters, numbers, and hyphens; starts with a letter.
+          </p>
+          <label class="field"
+            >Optimization profile<select name="profile">
+              <option value="balanced">Balanced</option>
+              <option value="low-latency">Low latency</option>
+              <option value="high-throughput">High throughput</option>
+            </select></label
+          >
+          <div class="field-grid">
+            <label class="field"
+              >Weight dtype<select name="dtype">
+                <option value="auto">Auto-detect</option>
+                <option value="bfloat16">BF16</option>
+                <option value="float16">FP16</option>
+              </select></label
+            ><label class="field"
+              >Quantization<select name="quantization">
+                <option value="">None</option>
+                <option value="fp8">FP8</option>
+                <option value="awq">AWQ</option>
+                <option value="gptq">GPTQ</option>
+              </select></label
+            >
+          </div>
+        </div>
+        <details class="advanced-settings">
+          <summary>Capacity &amp; context settings</summary>
+          <div class="field-grid">
+            <label class="field"
+              >Max context tokens<input
+                name="max_model_len"
+                type="number"
+                min="1"
+                step="1"
+                value="32768"
+                required /></label
+            ><label class="field"
+              >Target concurrency<input
+                name="target_concurrency"
+                type="number"
+                min="1"
+                step="1"
+                value="16"
+                required
+            /></label>
+          </div>
+          <label class="field"
+            >GPU memory allocation (%)<input
+              name="gpu_memory_percent"
+              type="number"
+              min="1"
+              max="100"
+              step="1"
+              value="90"
+              required
+          /></label>
+        </details>
+        <div class="notice muted-notice">
+          The model cache is warmed before provisioning. Large models can take
+          several minutes to schedule.
+        </div>
+        <p id="deploy-error" class="form-error" role="alert" hidden></p>
+        <div class="modal-footer">
+          <button
+            class="button secondary"
+            type="button"
+            data-close="deploy-dialog"
+          >
+            Cancel</button
+          ><button id="deploy-submit" class="button primary" type="submit">
+            Deploy model <span aria-hidden="true">→</span>
+          </button>
+        </div>
+      </form>
+    </dialog>
+    <dialog
+      id="detail-dialog"
+      class="modal detail-modal"
+      aria-labelledby="detail-title"
+    >
+      <div class="modal-heading">
+        <div>
+          <div class="eyebrow">WORKLOAD DETAILS</div>
+          <h2 id="detail-title">Deployment</h2>
+        </div>
+        <button
+          class="icon-button"
+          type="button"
+          data-close="detail-dialog"
+          aria-label="Close deployment details"
+        >
+          ×
+        </button>
+      </div>
+      <div id="detail-content"></div>
+      <div class="modal-footer">
+        <button
+          class="button secondary"
+          type="button"
+          data-close="detail-dialog"
+        >
+          Close
+        </button>
+      </div>
+    </dialog>
+    <dialog id="delete-dialog" class="modal" aria-labelledby="delete-title">
+      <form id="delete-form">
+        <div class="modal-heading">
+          <div>
+            <div class="eyebrow danger-text">REMOVE WORKLOAD</div>
+            <h2 id="delete-title">Delete deployment?</h2>
+          </div>
+          <button
+            class="icon-button"
+            type="button"
+            data-close="delete-dialog"
+            aria-label="Close delete confirmation"
+          >
+            ×
+          </button>
+        </div>
+        <p class="modal-description">
+          The control plane will deregister
+          <strong id="delete-name"></strong> from the gateway, drain active
+          requests, and remove its Kubernetes resources.
+        </p>
+        <div class="notice error-notice">
+          This stops serving the model. You can deploy it again later.
+        </div>
+        <p id="delete-error" class="form-error" role="alert" hidden></p>
+        <div class="modal-footer">
+          <button
+            class="button secondary"
+            type="button"
+            data-close="delete-dialog"
+          >
+            Keep deployment</button
+          ><button id="delete-submit" class="button danger" type="submit">
+            Delete deployment
+          </button>
+        </div>
+      </form>
+    </dialog>
+    <div id="toast" class="toast" role="status" hidden></div>
+  </body>
+</html>

@@ -16,7 +16,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.11'
 
       - name: Install dependencies
         run: |
@@ -26,11 +26,11 @@ jobs:
 
       - name: Run Ruff Lint Check
         run: |
-          ruff check control-plane/ loader/ tests/
+          ruff check control-plane/ loader/ tests/ scripts/deploy_clusters.py scripts/install_litellm.py
 
       - name: Run Mypy Type Check
         run: |
-          mypy --ignore-missing-imports control-plane/ loader/
+          mypy --ignore-missing-imports control-plane/ loader/ scripts/deploy_clusters.py scripts/install_litellm.py
 
   contracts-and-scripts:
     name: Shellcheck & Contracts Validation
@@ -41,7 +41,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.11'
 
       - name: Install dependencies
         run: |
@@ -64,7 +64,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.11'
 
       - name: Install dependencies
         run: |

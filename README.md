@@ -2,6 +2,49 @@
 
 Plateforme d'inférence distribuée multi-modèles à haute performance, conçue pour orchestrer des LLMs en architecture désagrégée (Prefill & Decode) avec NVIDIA Dynamo, synchronisation à chaud dans LiteLLM Proxy, et exposition sécurisée sans port entrant via Cloudflare Tunnel.
 
+Le pipeline de déploiement vers plusieurs clusters Kubernetes indépendants est
+documenté dans [deploy/README.md](deploy/README.md) : images immuables publiées une
+fois, secrets propres à chaque cluster, validation et vérification des rollouts.
+
+---
+
+## Console Web
+
+Le Control Plane sert une console à la racine `/` : inventaire GPU, recherche et filtrage des
+déploiements, détails du plan, création de modèles et suppression avec confirmation. Les données
+sont actualisées toutes les 10 secondes lorsque l'onglet est visible. Le token Bearer reste
+uniquement en mémoire dans l'onglet ; il est effacé lors de la déconnexion ou du rechargement.
+
+Pour essayer la console sans cluster (Python 3.11) :
+
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+CONTROL_PLANE_MOCK=1 uvicorn api.main:app --host 127.0.0.1 --port 8000
+```
+
+Ouvrir `http://127.0.0.1:8000` et utiliser `test-token` pour se connecter. Le bandeau
+« Mock environment » indique que l'inventaire et les déploiements sont simulés. Les profils
+connus proposés dans le formulaire fonctionnent hors ligne ; les autres identifiants interrogent
+Hugging Face pour obtenir leurs métadonnées. Les paramètres avancés permettent de régler la
+longueur de contexte, la concurrence et l'allocation mémoire.
+
+Avec un cluster réel, ne pas définir `CONTROL_PLANE_MOCK`. Configurer `CONTROL_PLANE_API_TOKEN`,
+`LITELLM_MASTER_KEY` et `LITELLM_PROXY_URL` via l'environnement ou des Secrets Kubernetes,
+ainsi que les credentials Kubernetes. La console utilise les mêmes endpoints protégés que l'API
+et affiche les erreurs de capacité ou de déploiement retournées par le service.
+
+Alternative Docker, toujours en simulation locale :
+
+```bash
+docker build -t ai-inference-control-plane:local -f control-plane/Dockerfile .
+docker run --rm -p 127.0.0.1:8000:8000 -e CONTROL_PLANE_MOCK=1 ai-inference-control-plane:local
+```
+
+La référence API interactive reste disponible sur `/docs`. Les fichiers de la console se trouvent
+dans `control-plane/api/web/` et ne nécessitent ni Node.js ni compilation pour l'exécution.
+
 ---
 
 ## 1. Architecture Globale et DAG d'Exécution
@@ -92,3 +135,9 @@ shellcheck scripts/*.sh
 # Exécution de la suite de tests complète (Unitaires + E2E)
 pytest -v tests/
 ```
+
+## Installation et configuration automatique de LiteLLM
+
+Voir le [guide LiteLLM](gateway/README.md) pour installer la passerelle, créer les
+secrets partagés avec le control plane et configurer automatiquement PostgreSQL
+persistant et l’enregistrement dynamique des modèles.

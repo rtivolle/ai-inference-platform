@@ -31,9 +31,13 @@ paths:
               properties:
                 model_id:
                   type: string
+                  minLength: 1
+                  maxLength: 256
+                  pattern: '^\S+$'
                   example: "meta-llama/Llama-3.3-70B-Instruct"
                 deployment_name:
-                  type: string
+                  type: [string, 'null']
+                  pattern: '^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$'
                   example: "llama-3-3-70b-instruct"
                 profile:
                   type: string
@@ -44,16 +48,21 @@ paths:
                   enum: [auto, bfloat16, float16, bf16, fp16]
                   default: auto
                 quantization:
-                  type: string
-                  enum: [fp8, awq, gptq]
+                  type: [string, 'null']
+                  enum: [fp8, awq, gptq, null]
+                  default: null
                 max_model_len:
                   type: integer
+                  minimum: 1
                   default: 32768
                 gpu_memory_utilization:
                   type: number
+                  exclusiveMinimum: 0
+                  maximum: 1
                   default: 0.90
                 target_concurrency:
                   type: integer
+                  minimum: 1
                   default: 16
       responses:
         '200':
@@ -80,6 +89,8 @@ paths:
           description: Insufficient GPU/VRAM capacity on cluster
         '400':
           description: Invalid request parameters
+        '422':
+          description: Request field validation failed
 
   /api/v1/models/{model_name}:
     delete:
@@ -128,6 +139,10 @@ paths:
                 type: array
                 items:
                   type: object
+                  properties:
+                    serving_mode:
+                      type: [string, 'null']
+                      enum: [aggregated, disaggregated, null]
         '401':
           description: Unauthorized request
 
@@ -158,6 +173,15 @@ paths:
                     type: string
                   ready:
                     type: boolean
+                  model_id:
+                    type: string
+                  serving_mode:
+                    type: [string, 'null']
+                    enum: [aggregated, disaggregated, null]
+                  namespace:
+                    type: string
+                  plan:
+                    type: [object, 'null']
         '401':
           description: Unauthorized request
         '404':
@@ -194,6 +218,18 @@ paths:
       responses:
         '200':
           description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  service:
+                    type: string
+                  mode:
+                    type: string
+                    enum: [mock, live]
 
   /health/readiness:
     get:

@@ -19,9 +19,6 @@ COPY control-plane/api/ /app/api/
 COPY contracts/ /contracts/
 COPY dynamo/templates/ /dynamo/templates/
 COPY loader/ /loader/
-COPY pyproject.toml /app/pyproject.toml
-
-RUN pip install --no-cache-dir -e .
 
 EXPOSE 8000
 

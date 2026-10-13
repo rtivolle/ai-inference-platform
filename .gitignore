@@ -22,3 +22,7 @@ control_plane
 # Eggs
 *.egg-info/
 *.egg
+
+# Local deployment credentials and rendered release manifests
+deploy/*.kubeconfig
+release/

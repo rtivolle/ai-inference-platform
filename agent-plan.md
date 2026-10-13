@@ -2,110 +2,211 @@
 
 Ce document définit l'architecture organisationnelle, les contrats d'interface, l'arborescence du monorepo, le graphe de dépendances (DAG) et les instructions système pour une **équipe de 6 agents autonomes** chargée de construire, tester et déployer l'intégralité de la plateforme d'inférence distribuée.
 
-## 0. État d'Avancement (revue du 2026-10-13)
+---
 
-Le commit `2a782cc` livre un **squelette complet des vagues 1 à 3** (≈ 3,9 k lignes, 8 tests `pytest` verts). Les vagues 4 et 5 (cluster réel, Cloudflare, E2E réel) **n'ont pas été exécutées** : tous les tests reposent sur des mocks.
+## 0. État d'Avancement et Audit Post-Remédiation (2026-10-13)
 
-| **Composant** | **Statut** | **Commentaire** |
+Historique du dépôt : `2a782cc` (livraison initiale du squelette vagues 1–3) → `8759dd9` (remédiation R1–R4 sur défauts D1–D12) → arbre de travail actuel (ajouts majeurs : pipeline multi-clusters, console web, RBAC runtime). Les vagues 4 et 5 (cluster bare-metal réel & validation E2E non-mockée) n'ont pas encore été exécutées.
+
+### 1. Synthèse Exécutive
+
+| Dimension | Statut | Commentaire |
 |---|---|---|
-| `contracts/` | ⚠️ | Présents, mais Contrat 1 confond `dtype` et `quantization` ; Contrat 2 non aligné sur le vrai CRD Dynamo. |
-| `scripts/`, `infra/` | ⚠️ | Rédigés et `shellcheck`-és, jamais appliqués sur un cluster. Secrets en clair / placeholders. |
-| `dynamo/templates/` | ❌ | Schéma DGD probablement inventé (`backend`, `model`, `sharedStorage`, `extraArgs`) ; `--quantization=bf16` invalide pour vLLM. |
-| `control-plane/autotuner/` | ⚠️ | Formules OK, mais planificateur ignorant la capacité réelle (réplicas figés, decode TP/2 sans vérif mémoire). |
-| `control-plane/api/` | ❌ | Fallbacks mock silencieux, état en mémoire, Job warmer jamais lancé, API sans authentification. |
-| `loader/` | ⚠️ | Script OK, non intégré au flux de déploiement. |
-| `monitoring/` | ⚠️ | Templates présents, non testés. |
-| `tests/`, CI | ⚠️ | Unitaires mockés uniquement ; pas de kubeconform, lint, typage ni build Docker en CI. |
+| **Architecture & Structure Monorepo** | 🟢 Conforme | Structure propre, packaging `pyproject.toml` unifié, suppression des symlinks et `sys.path`. |
+| **Contrat 1 : Auto-Tuner & VRAM** | 🟢 Conforme | Formules mathématiques exactes, support GQA/MLA, validation RFC 1123, contraintes de capacité respectées (HTTP 409). |
+| **Contrat 2 : CRD Dynamo & Templates** | 🔴 Non conforme | **Défaut D3 non résolu** : syntaxe `nvidia.com/v1alpha1` et `spec.services` synthétique conservée ; drapeaux NIXL vLLM non conformes à l'opérateur officiel. `dynamo_crd.schema.json` assoupli artificiellement au lieu d'aligner les templates sur v1beta1. |
+| **Contrat 3 : Synchronisation LiteLLM** | 🟢 Conforme | Suppression des mocks implicites, retries avec backoff exponentiel, échec bloquant la suppression Kubernetes. |
+| **Sécurité & Authentification (D7)** | 🟡 Partiel | Auth Bearer & Cloudflare Access active sur l'API, mais clés en clair résiduelles dans `gateway/litellm-deployment.yaml`. |
+| **Autoscaling KEDA (Wave 3)** | 🔴 Inopérant | Templates `keda-scaledobjects.yaml.j2` rédigés mais jamais appliqués par le réconciliateur lors d'un déploiement (D13). |
+| **Pipeline Multi-Clusters & Web UI** | 🟢 Bonus / Avancé | Script `scripts/deploy_clusters.py`, RBAC runtime, images immuables par digest et console web `control-plane/api/web/`. |
+| **Vagues 4 & 5 (Cluster réel & E2E)** | ⚪ Non démarrées | 100 % des tests reposent sur des mocks (`CONTROL_PLANE_MOCK=1`) ; aucun cluster réel ni intégration Kind n'a encore été validé. |
 
-### Défauts identifiés (référencés dans le plan de remédiation §4bis)
+---
 
-| **ID** | **Sévérité** | **Défaut** | **Fichier(s)** | **Agent** |
-|---|---|---|---|---|
-| D1 | 🔴 Critique | Bascule silencieuse en mode mock (K8s & LiteLLM) ; `deregister_model` renvoie `True` en cas d'échec → 502 au retrait. | `api/k8s_client.py`, `api/litellm_sync.py` | 4 |
-| D2 | 🔴 Critique | `--quantization=bf16/fp16` invalide : ces valeurs relèvent de `--dtype`. | `dynamo/templates/*`, `autotuner/sla_planner.py` | 2, 3 |
-| D3 | 🔴 Critique | Templates DGD non conformes au CRD réel de l'opérateur Dynamo. | `dynamo/templates/*`, `contracts/dynamo_crd.schema.json` | 2 |
-| D4 | 🔴 Critique | Planificateur sans contrainte de capacité : réplicas figés 2+4, `decode_tp = tp/2` sans vérif VRAM, fallback TP même si le modèle ne tient pas. | `autotuner/sla_planner.py`, `autotuner/vram_calculator.py` | 3 |
-| D5 | 🟠 Majeur | Inventaire GPU codé en dur (H100-80GB, RDMA, `available = total`). | `api/k8s_client.py` | 4 |
-| D6 | 🟠 Majeur | Job de pré-chargement NVMe jamais lancé ; timeout readiness de 2 min trop court. | `api/dynamo_reconciler.py`, `loader/` | 3, 4 |
-| D7 | 🔴 Critique | API Control Plane exposée sans authentification ; master keys en clair. | `api/main.py`, `gateway/*`, `infra/cloudflare/*` | 1, 4 |
-| D8 | 🟠 Majeur | État des déploiements en mémoire (perdu au redémarrage), drain fixe de 15 s en `BackgroundTask`. | `api/dynamo_reconciler.py`, `api/main.py` | 4 |
-| D9 | 🟠 Majeur | Inspecteur HF : estimation des paramètres fausse (GQA/MoE), pas de `head_dim` explicite ni MLA, `bfloat16` non normalisé, fallback silencieux sur un profil 70B. | `autotuner/hf_inspector.py` | 3 |
-| D10 | 🟡 Mineur | Packaging bricolé (symlink `control_plane`, `sys.path`). | racine, `api/main.py` | 0 |
-| D11 | 🟡 Mineur | Tests E2E mockés ; CI Python 3.11 vs local 3.14 ; pas de kubeconform/ruff/mypy/docker build. | `tests/`, `.github/` | 5, 0 |
-| D12 | 🟡 Mineur | Noms de déploiement non validés RFC 1123. | `autotuner/sla_planner.py` | 3 |
+### 2. Audit Détaillé des Défauts (D1 à D12) & Vagues de Remédiation (R1 à R4)
+
+| ID | Sév. | Défaut identifié dans le plan | Statut Réel | Évaluation de l'Implémentation | Agent |
+|---|---|---|---|---|---|
+| **D1** | 🔴 | Bascule silencieuse en mock & masquage d'erreurs LiteLLM | 🟢 Résolu | `K8sClient` et `LiteLLMSync` exigent `CONTROL_PLANE_MOCK=1` explicite (interdit in-cluster). `deregister_model` lève une exception et bloque la suppression K8s. | Agent 4 |
+| **D2** | 🔴 | `--quantization=bf16/fp16` invalide | 🟢 Résolu | Séparation stricte dans `model_spec.schema.json` et `sla_planner.py` : `dtype` distinct de `quantization`. Les templates n'émettent `--quantization` que s'il est non-nul. | Agent 2, 3 |
+| **D3** | 🔴 | Templates DGD non conformes au CRD réel de l'opérateur Dynamo | 🔴 Non Résolu | `dgd-disaggregated.yaml.j2` utilise toujours `nvidia.com/v1alpha1`, `spec.backend` et `spec.services`. Au lieu d'aligner le template sur `v1beta1` (`spec.components`), `dynamo_crd.schema.json` a été assoupli avec `"services": {"type": "object"}` pour faire passer les tests. | Agent 2 |
+| **D4** | 🔴 | Planificateur sans contrainte de capacité (réplicas figés) | 🟢 Résolu | `SLAPlanner.plan` calcule les GPU requis et lève `InsufficientCapacityError` (mappé en HTTP 409). Le ratio P/D dérive du profil et `can_decode_reduce_tp` valide la VRAM de décodage. | Agent 3 |
+| **D5** | 🟠 | Inventaire GPU codé en dur | 🟢 Résolu | `get_cluster_gpu_inventory` inspecte les nœuds réels, les labels GFD (`nvidia.com/gpu.product`, `nvidia.com/gpu.memory`) et soustrait les requêtes GPU des pods existants. | Agent 4 |
+| **D6** | 🟠 | Warmer NVMe jamais lancé ; timeout readiness trop court | 🟢 Résolu | `DynamoReconciler.deploy_model` génère et attend la fin du Job `warmer-job.yaml.j2` (timeout 30 min). La readiness frontend passe également à 1800s. | Agent 3, 4 |
+| **D7** | 🔴 | API sans authentification ; secrets en clair | 🟡 Partiel | `verify_auth` protège toutes les routes `/api/v1/*` via Bearer token ou en-têtes Cloudflare Access. En revanche, `gateway/litellm-deployment.yaml` contient toujours `sk-internal-litellm-master-key` et `litellm_secret` en clair. | Agent 1, 4 |
+| **D8** | 🟠 | État en mémoire ; drain fixe de 15s | 🟢 Résolu | `reconcile_existing` recharge l'état des CRDs Kubernetes au démarrage du Control Plane. Le drain vérifie dynamiquement `get_running_requests_count` jusqu'à 120s. | Agent 4 |
+| **D9** | 🟠 | Inspecteur HF imprécis (GQA, MLA, MoE) avec fallback silencieux | 🟢 Résolu | `HFInspector` lit `model.safetensors.index.json`, priorise `head_dim`, prend en compte `kv_lora_rank`/`qk_rope_head_dim` (MLA), et lève `ModelNotFoundError` (HTTP 404) sans fallback silencieux. | Agent 3 |
+| **D10** | 🟡 | Packaging bricolé (symlink & sys.path) | 🟢 Résolu | Migration vers `pyproject.toml` avec configuration setuptools, package discoverable et suppression des manipulations de `sys.path`. | Agent 0 |
+| **D11** | 🟡 | Tests mockés ; CI non alignée ; absence kubeconform/Kind | 🟡 Partiel | Docker builds, Ruff et Mypy intégrés en CI. Cependant, les tests E2E demeurent 100 % mockés, `kubeconform` et la validation Kind sont absents de la CI. | Agent 5, 0 |
+| **D12** | 🟡 | Noms de déploiement non conformes RFC 1123 | 🟢 Résolu | `sanitize_deployment_name` et validation Pydantic `validate_name` appliquent l'expression régulière RFC 1123. | Agent 3 |
+| **D13** | 🔴 | **Nouveau** — Autoscaling KEDA orphelin (Wave 3) | 🔴 Non Résolu | `keda-scaledobjects.yaml.j2` rédigé mais jamais appliqué dans `DynamoReconciler.deploy_model`. | Agent 4, 5 |
+| **D14** | 🟠 | **Nouveau** — Piège du cache NVMe hostPath multi-nœuds | 🔴 Non Résolu | `warmer-job.yaml.j2` mono-pod ne préchauffe qu'un seul nœud sur un cluster multi-nœuds. À convertir en Job indexé ou DaemonSet. | Agent 3, 4 |
+| **D15** | 🟡 | **Nouveau** — Secrets statiques dans `gateway/` | 🔴 Non Résolu | Clés en clair dans `gateway/litellm-deployment.yaml` à remplacer par `secretKeyRef: inference-runtime`. | Agent 1, 4 |
+
+---
+
+### 3. Écarts Critiques & Dette Technique
+
+#### 1. Incompatibilité du CRD Dynamo avec l'Opérateur Réel (Défaut D3)
+Le modèle de template actuel `dgd-disaggregated.yaml.j2` génère :
+```yaml
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+spec:
+  backend: vllm
+  model: "{{ model_id }}"
+  services:
+    Frontend: ...
+    PrefillWorker: ...
+    DecodeWorker: ...
+```
+Or, selon les spécifications NVIDIA Dynamo v1.5+ ([docs.md](file:///home/rtivolle/ai-inference-platform/docs.md)) :
+* La version de stockage canonique est `nvidia.com/v1beta1`.
+* Le bloc `spec.services` a été remplacé par une liste typée `spec.components` où chaque composant définit un rôle (`frontend`, `prefill`, `decode`), des réplicas, un `providerOverride` Grove et un conteneur `main` exécutant `python3 -m dynamo.vllm`.
+* Le transfert de KV-Cache via RDMA / NIXL s'effectue via l'argument :
+  `--kv-transfer-config '{"kv_connector":"NixlConnector", "kv_role":"kv_producer|kv_consumer", "kv_buffer_device":"cuda"}'`
+  et non par des variables d'environnement arbitraires `VLLM_KV_CACHE_TRANSFER_*`. Le Frontend exige également `DYN_ROUTER_MODE=kv`.
+
+> [!WARNING]
+> Sur un cluster réel où l'opérateur officiel NVIDIA Dynamo est installé, les manifestes générés par `DynamoReconciler` seront immédiatement rejetés à l'admission ou ignorés par le contrôleur.
+
+#### 2. Autoscaling KEDA Orphelin (Wave 3 / Défaut D13)
+Bien que `monitoring/keda-scaledobjects.yaml.j2` cible correctement le `DynamoGraphDeploymentScalingAdapter` (`v1beta1`), ce template n'est jamais appelé ni appliqué dans la boucle de réconciliation de `DynamoReconciler.deploy_model`. Aucun `ScaledObject` n'est créé lors du déploiement d'un modèle, et aucun n'est nettoyé lors du `DELETE`.
+
+#### 3. Piège du Cache NVMe hostPath en Multi-Nœuds (D6 / Wave 4 / Défaut D14)
+Le Job de pré-chargement `loader/warmer-job.yaml.j2` est un Job Kubernetes simple (1 seul pod). Sur un cluster multi-nœuds, il n'alimente que le disque local du nœud sur lequel le pod warmer a été programmé. Lorsque les pods Prefill et Decode sont ensuite planifiés par Grove/KAI sur d'autres nœuds, leur répertoire `/mnt/nvme/model-cache` sera vide, forçant un re-téléchargement Hugging Face au démarrage. Le job doit être converti en **Job Indexé** (`completionMode: Indexed` avec anti-affinité de pod) ou en **DaemonSet** ciblant tous les nœuds GPU étiquetés.
+
+#### 4. Secrets en Clair Résiduels dans le Dépôt (D7 / Défaut D15)
+Bien que `scripts/deploy_clusters.py` remplace dynamiquement les variables d'environnement par des références `secretKeyRef: inference-runtime`, le fichier statique `gateway/litellm-deployment.yaml` contient encore des mots de passe en dur (`sk-internal-litellm-master-key`, `litellm_secret`). Il convient de le convertir en template ou en fichier `.example.yaml` et d'injecter les secrets via Kubernetes Secret.
+
+---
+
+### 4. Analyse des Nouveaux Développements (Non Prévus Initialement)
+
+Entre le commit `8759dd9` et l'état de l'arbre de travail, des fonctionnalités majeures ont été ajoutées et doivent être formalisées dans le plan :
+
+1. **Pipeline de Déploiement Multi-Clusters Indépendants (`deploy/`, `scripts/deploy_clusters.py`, `.github/workflows/deploy.yaml`)** :
+   - Publication centralisée d'images immuables par digest SHA-256 (`repository@sha256:...`).
+   - Script d'orchestration `scripts/deploy_clusters.py` avec vérifications préalables strictes (preflight checks, conformité des contextes, dry-run côté serveur, séquence ordonnée Gateway puis Control Plane).
+   - Suite de tests unitaires dédiée (`tests/test_cluster_deployment.py`, 13 tests validant le comportement hors cluster).
+
+2. **RBAC Runtime (`infra/control-plane-rbac.yaml`)** :
+   - ServiceAccount, ClusterRole et ClusterRoleBinding attribuant les permissions granulaires nécessaires au Control Plane (`dynamographdeployments`, `endpointslice`, `nodes`, `jobs`, `secrets`).
+
+3. **Console Web du Control Plane (`control-plane/api/web/`)** :
+   - Interface monopage moderne (HTML5 sémantique, CSS accessible avec contrastes et thèmes adaptés, JS natif sans framework lourd).
+   - Gestion de l'authentification Bearer token avec conservation en mémoire.
+   - Formulaire de déploiement connecté à l'Auto-Tuner, visualisation de l'inventaire des pools GPU et suivi du statut des déploiements en temps réel.
+   - Montage direct dans FastAPI sous `/` et `/assets`.
+   - Suite de tests unitaires dédiée (`tests/test_web_console.py`, 12 tests).
+
+---
+
+### 5. État des Tests et Qualité
+
+* **Pytest** : **39/39 tests passent avec succès** :
+  - `tests/test_vram_calculator.py` : 7 tests (formules mathématiques, GQA/MLA, contraintes TP, divisibilité).
+  - `tests/test_crd_rendering.py` : 2 tests (rendu Jinja2 et validation de schéma).
+  - `tests/test_cluster_deployment.py` : 13 tests (validation du déploiement multi-clusters, dry-run, digest).
+  - `tests/test_web_console.py` : 12 tests (routage web, assets statiques, sécurité, formulaires).
+  - `tests/e2e_deployment_flow.py` : 5 tests (cycle de vie complet mocké).
+* **Mypy** : 0 erreur sur le module `control-plane`.
+* **Ruff** : `ruff check control-plane` passe sans anomalie (imports triés, code formaté).
+
+---
+
+### 6. Feuille de Route Recommandée pour les Vagues 4 & 5 (Vague R5 Pré-Cluster)
+
+Avant d'initier le déploiement sur cluster réel (Vague 4) et les tests de charge en streaming (Vague 5), les actions suivantes sont requises dans une vague **R5 Pré-Cluster** :
+
+1. **Résoudre D3** : Aligner les templates Jinja2 (`dgd-disaggregated.yaml.j2` et `dgd-aggregated.yaml.j2`) et le schéma `contracts/dynamo_crd.schema.json` sur `nvidia.com/v1beta1` (`components[]` avec conteneur `main`, `--disaggregation-mode`, `--kv-transfer-config` NixlConnector, `DYN_ROUTER_MODE=kv`).
+2. **Intégrer KEDA (D13)** : Appliquer le template `keda-scaledobjects.yaml.j2` dans `DynamoReconciler.deploy_model` et assurer son nettoyage lors de `delete_model`.
+3. **Corriger le Warmer Multi-Nœuds (D14)** : Transformer `loader/warmer-job.yaml.j2` en Job indexé ou DaemonSet pour peupler le NVMe de tous les nœuds GPU cibles.
+4. **Assainir les Secrets Statiques (D15)** : Renommer `gateway/litellm-deployment.yaml` en `.example.yaml` et injecter les credentials via `secretKeyRef: inference-runtime`.
+5. **Validation CI Kind & Kubeconform (D11)** : Ajouter dans la CI GitHub Actions la validation `kubeconform` (avec le CRD officiel Dynamo v1beta1) et un cluster éphémère Kind exécutant le cycle de déploiement.
+6. **Commit des Nouveaux Développements** : Valider et commiter le pipeline multi-clusters et la console web dans `main`.
+
+---
 
 ## 1. Topologie de l'Équipe d'Agents et Responsabilités
 
 Chaque agent possède un périmètre d'écriture strict dans le monorepo afin d'éviter tout conflit de fusion lors des exécutions parallèles.
 
 | **ID Agent** | **Rôle** | **Périmètre Monorepo** | **Responsabilités Clés** |
-|---|---|---|---| 
-| **Agent 0** | **Lead Architect & Orchestrator** | `/`, `contracts/`, `.github/` | Définit les schémas Pydantic/OpenAPI partagés, orchestre le DAG d'exécution, valide les Quality Gates et fusionne les branches. | 
-| **Agent 1** | **Infra, K8s & Cloudflare Network** | `infra/`, `scripts/` | Automatise l'installation OS/GPU, K3s, [NVIDIA GPU Operator](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/), Ingress-NGINX, [Cloudflare Tunnel et ExternalDNS](https://itnext.io/exposing-kubernetes-apps-to-the-internet-with-cloudflare-tunnel-ingress-controller-and-e30307c0fcb0), **Cloudflare Access** devant le Control Plane, gestion des secrets (pas de secret en clair dans Git). | 
-| **Agent 2** | **NVIDIA Dynamo & Disaggregated Serving** | `dynamo/` | Déploie [NVIDIA Dynamo Platform](https://docs.nvidia.com/dynamo/) (CRDs, Grove, KAI Scheduler), conçoit les templates `DynamoGraphDeployment` (Prefill/Decode) et configure le transfert KV-Cache RDMA/NVLink. | 
-| **Agent 3** | **Auto-Tuner & Model Loader Engine** | `control-plane/autotuner/`, `loader/` | Inspecte les métadonnées Hugging Face / S3 (`config.json`), calcule la VRAM (poids + KV-Cache), déduit TP/PP/Quantization/Ratio P-D et gère le pré-chargement sur cache NVMe. | 
-| **Agent 4** | **Control Plane API & LiteLLM Sync** | `control-plane/api/`, `gateway/` | Développe le WebService FastAPI, pilote les CRDs Kubernetes, surveille les `EndpointSlices` et synchronise à chaud les modèles dans [LiteLLM Proxy](https://docs.litellm.ai/docs/proxy/model_management) (`/model/new`, `/model/delete`). | 
-| **Agent 5** | **Autoscaling (KEDA), Observabilité & QA** | `monitoring/`, `tests/` | Configure Prometheus + DCGM Exporter, crée les `ScaledObject` KEDA basés sur les métriques vLLM/Dynamo et exécute les tests de bout en bout (E2E) et de charge. | 
+|---|---|---|---|
+| **Agent 0** | **Lead Architect & Orchestrator** | `/`, `contracts/`, `.github/` | Définit les schémas Pydantic/OpenAPI partagés, orchestre le DAG d'exécution, valide les Quality Gates, gère le packaging `pyproject.toml` et fusionne les branches. |
+| **Agent 1** | **Infra, K8s & Cloudflare Network** | `infra/`, `scripts/`, `deploy/` | Automatise l'installation OS/GPU, K3s, [NVIDIA GPU Operator](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/), Ingress-NGINX, [Cloudflare Tunnel et ExternalDNS](https://itnext.io/exposing-kubernetes-apps-to-the-internet-with-cloudflare-tunnel-ingress-controller-and-e30307c0fcb0), **Cloudflare Access** devant le Control Plane, et orchestre le pipeline de déploiement multi-clusters (`deploy_clusters.py`). |
+| **Agent 2** | **NVIDIA Dynamo & Disaggregated Serving** | `dynamo/` | Déploie [NVIDIA Dynamo Platform](https://docs.nvidia.com/dynamo/) (CRDs v1beta1, Grove, KAI Scheduler), conçoit les templates `DynamoGraphDeployment` v1beta1 (Prefill/Decode avec NixlConnector) et configure le transfert KV-Cache RDMA/NVLink. |
+| **Agent 3** | **Auto-Tuner & Model Loader Engine** | `control-plane/autotuner/`, `loader/` | Inspecte les métadonnées Hugging Face / S3 (`config.json`, `safetensors.index.json`), calcule la VRAM exacte (poids + KV-Cache GQA/MLA), déduit TP/PP/Quantization/Ratio P-D avec contrainte de capacité stricte et gère le pré-chargement multi-nœuds sur cache NVMe. |
+| **Agent 4** | **Control Plane API & LiteLLM Sync** | `control-plane/api/`, `gateway/` | Développe le WebService FastAPI et la console web SPA, réconcilie les CRDs Kubernetes et les ScaledObjects KEDA, surveille les `EndpointSlices` et synchronise à chaud les modèles dans [LiteLLM Proxy](https://docs.litellm.ai/docs/proxy/model_management) (`/model/new`, `/model/delete`). |
+| **Agent 5** | **Autoscaling (KEDA), Observabilité & QA** | `monitoring/`, `tests/` | Configure Prometheus + DCGM Exporter, conçoit les `ScaledObject` KEDA ciblant le `DynamoGraphDeploymentScalingAdapter`, maintient la suite de tests unitaires/E2E et valide la qualité en CI (Kind, Ruff, Mypy). |
+
+---
 
 ## 2. Arborescence Cible du Monorepo
 
-Tous les agents travaillent sur une structure de dépôt unifiée :
-
 ```
 ai-inference-platform/
-├── pyproject.toml                    # [Agent 0] Packaging unique (remplace symlink control_plane + sys.path)
-├── contracts/                        # [Agent 0] Contrats figés entre agents
-│   ├── model_spec.schema.json        # Entrée/Sortie du calculateur Auto-Tuner
-│   ├── dynamo_crd.schema.json        # Schéma de génération DynamoGraphDeployment
+├── pyproject.toml                    # [Agent 0] Packaging unifié Python (remplace symlink et sys.path)
+├── contracts/                        # [Agent 0] Contrats d'interfaces figés entre agents
+│   ├── model_spec.schema.json        # Entrée/Sortie du calculateur Auto-Tuner (Contrat 1)
+│   ├── dynamo_crd.schema.json        # Schéma de validation DynamoGraphDeployment v1beta1 (Contrat 2)
 │   └── control_plane_openapi.yaml    # Spécification REST du WebService
-├── scripts/                          # [Agent 1] Scripts d'initialisation bare-metal
-│   └── bootstrap_inference_cluster.sh
+├── scripts/                          # [Agent 1] Scripts d'initialisation et d'orchestration
+│   ├── bootstrap_inference_cluster.sh# Bootstrap bare-metal Ubuntu (K3s, GPU Operator, RDMA)
+│   └── deploy_clusters.py            # [Ajout] Déploiement multi-clusters (preflight, digest SHA-256)
+├── deploy/                           # [Ajout] Manifestes et contextes des clusters cibles
 ├── infra/                            # [Agent 1] Manifests K8s d'infrastructure
-│   ├── gpu-operator/
-│   ├── network-rdma/
-│   ├── storage-nvme/
-│   └── cloudflare/                   # cloudflared + external-dns + ingress-nginx
-├── dynamo/                           # [Agent 2] Templates & CRDs NVIDIA Dynamo
-│   ├── helm-values/
+│   ├── control-plane-rbac.yaml       # [Ajout] RBAC runtime du Control Plane
+│   ├── gpu-operator/                 # Configuration GPU Operator
+│   ├── network-rdma/                 # Configuration NicClusterPolicy RoCE / InfiniBand
+│   ├── storage-nvme/                 # StorageClass local et PVC pour /mnt/nvme/model-cache
+│   └── cloudflare/                   # cloudflared (2 réplicas) + external-dns + ingress-nginx
+├── dynamo/                           # [Agent 2] Templates & CRDs NVIDIA Dynamo v1beta1
+│   ├── helm-values/                  # Configuration Dynamo Platform, Grove et KAI Scheduler
 │   └── templates/
-│       ├── dgd-disaggregated.yaml.j2 # Template Prefill/Decode séparés (Grove)
-│       └── dgd-aggregated.yaml.j2    # Template standard monobloc
-├── loader/                           # [Agent 3] Job/Daemon de cache NVMe
-│   ├── Dockerfile
-│   ├── warmer-job.yaml.j2            # [R3] Job K8s de pré-chargement lancé par le Control Plane
-│   └── model_warmer.py               # Téléchargement parallèle HF/S3 -> NVMe
-├── control-plane/                    # [Agent 3 & Agent 4] Backend Python FastAPI
+│       ├── dgd-disaggregated.yaml.j2 # Template v1beta1 Prefill/Decode séparés (Grove + NIXL)
+│       └── dgd-aggregated.yaml.j2    # Template v1beta1 standard monobloc
+├── loader/                           # [Agent 3] Pré-chargement NVMe multi-nœuds
+│   ├── Dockerfile                    # Image de téléchargement rapide
+│   ├── warmer-job.yaml.j2            # [R5] Job K8s indexé / DaemonSet multi-nœuds
+│   └── model_warmer.py               # Téléchargement parallèle HF/S3 avec hf_transfer -> NVMe
+├── control-plane/                    # [Agent 3 & Agent 4] Backend Python FastAPI + UI
+│   ├── Dockerfile                    # Image de production du Control Plane
 │   ├── autotuner/                    # [Agent 3] Calculateur VRAM, TP, PP, P/D Ratio
-│   │   ├── hf_inspector.py
-│   │   ├── vram_calculator.py
-│   │   └── sla_planner.py
+│   │   ├── hf_inspector.py           # Inspection safetensors/config HF sans téléchargement
+│   │   ├── vram_calculator.py        # Calcul VRAM exact (poids, GQA/MLA, KV-cache)
+│   │   └── sla_planner.py            # Planificateur SLA avec contraintes de capacité
 │   └── api/                          # [Agent 4] Serveur FastAPI + K8s Watcher + LiteLLM
-│       ├── main.py
-│       ├── k8s_client.py
-│       ├── dynamo_reconciler.py
-│       └── litellm_sync.py
+│       ├── main.py                   # Endpoints REST, cycle de vie, authentification
+│       ├── k8s_client.py             # Client asynchrone Kubernetes (CRD, EndpointSlice, GFD)
+│       ├── dynamo_reconciler.py      # Réconciliateur Dynamo DGD + KEDA ScaledObjects
+│       ├── litellm_sync.py           # Synchroniseur dynamique LiteLLM avec retries
+│       └── web/                      # [Ajout] Console Web SPA (HTML/CSS/JS natif)
 ├── gateway/                          # [Agent 4] Configuration LiteLLM + Postgres + Redis
-│   ├── litellm-deployment.yaml
-│   └── config.yaml
+│   ├── litellm-deployment.yaml       # Déploiement LiteLLM Proxy (sécurisé via Secret)
+│   └── config.yaml                   # Configuration du proxy LiteLLM
 ├── monitoring/                       # [Agent 5] KEDA, Prometheus, Grafana
-│   ├── keda-scaledobjects.yaml.j2
-│   └── prometheus-rules.yaml
-└── tests/                            # [Agent 5] Suite de validation unitaire & E2E
-    ├── test_vram_calculator.py
-    ├── test_crd_rendering.py
-    └── e2e_deployment_flow.py
-
+│   ├── keda-scaledobjects.yaml.j2    # ScaledObjects KEDA ciblant DGDScalingAdapter
+│   └── prometheus-rules.yaml         # Alertes et règles d'enregistrement DCGM / vLLM
+└── tests/                            # [Agent 5] Suite de tests unitaires, rendus et E2E
+    ├── conftest.py                   # Fixtures pytest partagées
+    ├── test_vram_calculator.py       # Validation formules VRAM, divisibilité H_kv % TP
+    ├── test_crd_rendering.py         # Validation rendu Jinja2 et schémas JSON
+    ├── test_cluster_deployment.py    # [Ajout] Validation pipeline multi-clusters
+    ├── test_web_console.py           # [Ajout] Validation endpoints et assets console web
+    └── e2e_deployment_flow.py        # Validation cycle de vie complet (mocké / Kind)
 ```
+
+---
 
 ## 3. Contrats d'Interface Techniques (Handshakes Inter-Agents)
 
-Pour permettre aux agents 2, 3 et 4 de coder simultanément sans blocage, l'**Agent 0** verrouille trois contrats de données dès l'initialisation.
-
 ### Contrat 1 : Sortie de l'Auto-Tuner (Agent 3 -> Agent 2 & Agent 4)
 
-L'Agent 3 expose une fonction pure `compute_deployment_plan(request: DeployRequest, cluster_gpu_inventory: ClusterInventory) -> DeploymentPlan` qui retourne la structure suivante :
+L'Agent 3 expose la fonction pure `compute_deployment_plan(request: DeployRequest, cluster_gpu_inventory: ClusterInventory) -> DeploymentPlan` conforme à `contracts/model_spec.schema.json` :
 
-```
+```json
 {
   "model_id": "meta-llama/Llama-3.3-70B-Instruct",
   "deployment_name": "llama-3-3-70b-instruct",
@@ -132,237 +233,262 @@ L'Agent 3 expose une fonction pure `compute_deployment_plan(request: DeployReque
   },
   "kv_cache_transfer": {
     "protocol": "rdma",
-    "engine": "nixl"
+    "engine": "nixl",
+    "backend": "UCX"
   }
 }
-
 ```
 
-**Règles du Contrat 1 (révision R1/R2) :**
+**Règles du Contrat 1 :**
+* `dtype` ∈ {`auto`, `bfloat16`, `float16`} → transmis à `--dtype`.
+* `quantization` ∈ {`null`, `fp8`, `awq`, `gptq`} → transmis à `--quantization` uniquement s'il n'est pas `null` (résout D2).
+* Clé `engine` en minuscules (`nixl`).
+* `deployment_name` validé selon l'expression régulière RFC 1123 (`^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$`).
+* **Contrainte de capacité** : $\sum (\text{replicas} \times TP \times PP) \le GPU_{\text{disponibles}}$. Si la capacité est insuffisante, levée immédiate de `InsufficientCapacityError` (HTTP 409).
+* La clique de décodage ne peut réduire son TP (`tp_size // 2`) que si la VRAM unitaire le permet (`can_decode_reduce_tp`).
 
-* `dtype` ∈ {`auto`, `bfloat16`, `float16`} → passé à `--dtype`. `quantization` ∈ {`null`, `fp8`, `awq`, `gptq`} → passé à `--quantization` **uniquement s'il n'est pas `null`** (corrige D2).
-* Clé `engine` en minuscules uniquement (suppression du doublon `Engine`).
-* `deployment_name` conforme RFC 1123 (`^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$`), validé par le schéma (D12).
-* **Contrainte de capacité** : `Σ(replicas × TP × PP)` sur toutes les cliques ≤ GPU disponibles du pool cible. Sinon, la fonction lève `InsufficientCapacityError` (HTTP 409) au lieu de dégrader silencieusement (D4).
-* Chaque clique doit tenir en mémoire **avec son propre TP** (le decode ne peut réduire son TP que si la VRAM le permet).
+---
 
-### Contrat 2 : Rendu du CRD `DynamoGraphDeployment` (Agent 2 -> Agent 4)
+### Contrat 2 : Rendu du CRD `DynamoGraphDeployment` v1beta1 (Agent 2 -> Agent 4)
 
-L'Agent 2 fournit un moteur de rendu Jinja2 qui transforme le `DeploymentPlan` JSON en manifeste Kubernetes `DynamoGraphDeployment` valide pour le [Dynamo Operator](https://docs.nvidia.com/dynamo/) :
+L'Agent 2 fournit les gabarits Jinja2 produisant un manifeste conforme au schéma canonique **`nvidia.com/v1beta1`** de NVIDIA Dynamo v1.5+ :
 
-> [!WARNING]
-> **D3 — Le squelette ci-dessous est indicatif et non conforme au CRD réel.** Avant toute modification des templates, l'Agent 2 doit extraire le schéma officiel (`kubectl explain dynamographdeployment.spec --recursive` ou le CRD du chart Helm de la version Dynamo épinglée), le figer dans `contracts/dynamo_crd.schema.json`, puis réécrire les templates (structure attendue de type `services.<Nom>.componentType`, `extraPodSpec.mainContainer.args`, volumes/env explicites). Les variables `VLLM_KV_CACHE_TRANSFER_*` doivent être remplacées par la configuration KV-transfer réellement supportée (NIXL).
-
-```
-apiVersion: nvidia.com/v1alpha1
+```yaml
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: "{{ deployment_name }}"
-  namespace: "{{ namespace }}"
+  namespace: "{{ namespace | default('dynamo-workloads') }}"
   labels:
     app.kubernetes.io/managed-by: dynamo-control-plane
+    dynamo.nvidia.com/serving-mode: disaggregated
+  annotations:
+    nvidia.com/grove-update-strategy: RollingRecreate
 spec:
-  backend: vllm
-  model: "{{ model_id }}"
-  sharedStorage:
-    hostPath: "/mnt/nvme/model-cache"
-  services:
-    Frontend:
+  backendFramework: vllm
+  components:
+    - name: frontend
+      type: frontend
       replicas: 2
-      ports:
-        - name: http
-          port: 8000
-    PrefillWorker:
-      replicas: {{ prefill_clique.replicas }}
-      resources:
-        limits:
-          nvidia.com/gpu: {{ prefill_clique.tensor_parallel_size }}
-      extraArgs:
-        - "--tensor-parallel-size={{ prefill_clique.tensor_parallel_size }}"
-        - "--dtype={{ dtype }}"
-        {% if quantization %}
-        - "--quantization={{ quantization }}"
-        {% endif %}
-        - "--max-model-len={{ max_model_len }}"
-        - "--gpu-memory-utilization={{ gpu_memory_utilization }}"
-    DecodeWorker:
-      replicas: {{ decode_clique.replicas }}
-      resources:
-        limits:
-          nvidia.com/gpu: {{ decode_clique.tensor_parallel_size }}
-      extraArgs:
-        - "--tensor-parallel-size={{ decode_clique.tensor_parallel_size }}"
-        - "--dtype={{ dtype }}"
-        {% if quantization %}
-        - "--quantization={{ quantization }}"
-        {% endif %}
-        - "--max-model-len={{ max_model_len }}"
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: "{{ dynamo_runtime_image }}"
+              env:
+                - name: DYN_ROUTER_MODE
+                  value: "kv"
+              ports:
+                - name: http
+                  containerPort: 8000
 
+    - name: prefill
+      type: prefill
+      replicas: {{ prefill_clique.replicas }}
+      providerOverride:
+        apiVersion: grove.io/v1alpha1
+        value:
+          spec:
+            minAvailable: 1
+      podTemplate:
+        spec:
+          volumes:
+            - name: model-cache
+              hostPath:
+                path: /mnt/nvme/model-cache
+                type: DirectoryOrCreate
+            - name: dshm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 32Gi
+          containers:
+            - name: main
+              image: "{{ dynamo_runtime_image }}"
+              workingDir: /workspace/examples/backends/vllm
+              command:
+                - python3
+                - -m
+                - dynamo.vllm
+              args:
+                - --model={{ model_id }}
+                - --disaggregation-mode=prefill
+                - --tensor-parallel-size={{ prefill_clique.tensor_parallel_size }}
+                - --dtype={{ dtype }}
+                {% if quantization %}
+                - --quantization={{ quantization }}
+                {% endif %}
+                - --max-model-len={{ max_model_len }}
+                - --max-num-batched-tokens={{ prefill_clique.max_num_batched_tokens }}
+                - --gpu-memory-utilization={{ gpu_memory_utilization }}
+                - --enable-chunked-prefill=true
+                - --kv-transfer-config={"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_buffer_device":"cuda"}
+              resources:
+                limits:
+                  nvidia.com/gpu: {{ prefill_clique.tensor_parallel_size }}
+
+    - name: decode
+      type: decode
+      replicas: {{ decode_clique.replicas }}
+      podTemplate:
+        spec:
+          volumes:
+            - name: model-cache
+              hostPath:
+                path: /mnt/nvme/model-cache
+                type: DirectoryOrCreate
+            - name: dshm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 32Gi
+          containers:
+            - name: main
+              image: "{{ dynamo_runtime_image }}"
+              workingDir: /workspace/examples/backends/vllm
+              command:
+                - python3
+                - -m
+                - dynamo.vllm
+              args:
+                - --model={{ model_id }}
+                - --disaggregation-mode=decode
+                - --tensor-parallel-size={{ decode_clique.tensor_parallel_size }}
+                - --dtype={{ dtype }}
+                {% if quantization %}
+                - --quantization={{ quantization }}
+                {% endif %}
+                - --max-model-len={{ max_model_len }}
+                - --gpu-memory-utilization={{ gpu_memory_utilization }}
+                - --kv-transfer-config={"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"cuda"}
+              resources:
+                limits:
+                  nvidia.com/gpu: {{ decode_clique.tensor_parallel_size }}
 ```
+
+---
 
 ### Contrat 3 : Synchronisation Dynamique LiteLLM (Agent 4)
 
-Dès que l'`EndpointSlice` du service `{{ deployment_name }}-frontend` passe à `Ready=true`, l'Agent 4 exécute l'appel REST suivant vers [LiteLLM Proxy](https://docs.litellm.ai/docs/proxy/model_management) :
+Dès que l'`EndpointSlice` du service frontend (`{{ deployment_name }}-frontend`) passe à `Ready=true`, l'Agent 4 exécute l'enregistrement REST vers LiteLLM Proxy :
 
-```
+```http
 POST http://litellm-service.ai-gateway.svc.cluster.local:4000/model/new
 Authorization: Bearer <LITELLM_MASTER_KEY>
 Content-Type: application/json
 
 {
-  "model_name": "llama-3.3-70b",
+  "model_name": "llama-3-3-70b-instruct",
   "litellm_params": {
     "model": "openai/meta-llama/Llama-3.3-70B-Instruct",
-    "api_base": "http://llama-3-3-70b-frontend.dynamo-workloads.svc.cluster.local:8000/v1",
+    "api_base": "http://llama-3-3-70b-instruct-frontend.dynamo-workloads.svc.cluster.local:8000/v1",
     "api_key": "internal-dynamo-key",
     "rpm": 1000,
     "timeout": 600
   },
   "model_info": {
-    "id": "dgd-llama-3-3-70b",
+    "id": "dgd-llama-3-3-70b-instruct",
     "mode": "chat",
     "supports_function_calling": true
   }
 }
-
 ```
 
-**Règles du Contrat 3 (révision R1) :**
+**Règles du Contrat 3 :**
+* Aucun fallback mock silencieux : un échec d'enregistrement ou de suppression lève une exception et bloque la réconciliation.
+* Retries avec backoff exponentiel (3 tentatives) lors de la synchronisation réseau.
+* La suppression Kubernetes d'un modèle n'est autorisée **que si** le retrait dans LiteLLM (`/model/delete`) a réussi et que les requêtes en cours ont été drainées.
+* `LITELLM_MASTER_KEY` est injectée obligatoirement par Secret Kubernetes.
 
-* **Aucun fallback mock implicite** : un échec HTTP de `/model/new` ou `/model/delete` est une erreur, avec retry exponentiel (3 tentatives) puis statut `failed` exposé par l'API (D1).
-* Le retrait K8s n'a lieu **que si** `/model/delete` a réussi ; sinon la suppression est bloquée et signalée.
-* Le mode mock n'existe que s'il est demandé explicitement (`CONTROL_PLANE_MOCK=1`) et est refusé lorsque l'API tourne in-cluster.
-* `LITELLM_MASTER_KEY` est lue exclusivement depuis un Secret Kubernetes ; aucune valeur par défaut dans le code.
+---
 
-## 4. Plan d'Exécution Séquentiel et Parallèle (DAG en 5 Vagues)
+## 4. Plan d'Exécution Global et Vagues de Remédiation
 
-Le projet est découpé en **5 vagues (Waves)**. Au sein d'une même vague, les agents travaillent simultanément.
-
-| **Vague** | **Agents Actifs** | **Tâches Exécutées en Parallèle** | **Critère de Validation (Quality Gate)** |
-|---|---|---|---| 
-| **Vague 1 : Fondations & Contrats** | **Agent 0**, **Agent 1** | **Agent 0** : Initialise le monorepo et publie les 3 schémas dans `contracts/`.  **Agent 1** : Finalise `bootstrap_inference_cluster.sh`, les manifests Cloudflare Tunnel (`cloudflared`), `external-dns` et le StorageClass NVMe. | Validation syntaxique `shellcheck` / `kubeconform` sur `infra/` et validation JSON Schema sur `contracts/`. | 
-| **Vague 2 : Développement Cœur (Parallèle)** | **Agent 2**, **Agent 3**, **Agent 4** | **Agent 2** : Écrit les templates Jinja2 `DynamoGraphDeployment` (agrégé et désagrégé P/D) + scripts d'init RDMA.  **Agent 3** : Code l'inspecteur Hugging Face (`hf_inspector.py`), le calculateur de VRAM (`vram_calculator.py`) et le job de pré-chargement NVMe (`model_warmer.py`).  **Agent 4** : Développe l'API FastAPI (`POST /models/deploy`, `DELETE /models/{id}`, `GET /cluster/gpus`), le client K8s (`kubernetes_asyncio`) et le connecteur LiteLLM. | Tests unitaires isolés : l'Agent 3 génère un JSON conforme au Contrat 1 ; l'Agent 2 produit un YAML valide selon le Contrat 2 ; l'Agent 4 passe les tests avec mocks K8s/LiteLLM. | 
-| **Vague 3 : Autoscaling & Intégration** | **Agent 0**, **Agent 4**, **Agent 5** | **Agent 5** : Crée les templates `ScaledObject` KEDA basés sur les métriques Prometheus de Dynamo (`vllm:num_requests_waiting`, `vllm:gpu_cache_usage_perc`).  **Agent 4 & Agent 0** : Intègrent les modules `autotuner/` (Agent 3) et `dynamo/templates/` (Agent 2) dans le pipeline de déploiement de `control-plane/api/`. | Construction de l'image Docker du Control Plane réussie et lancement du conteneur en environnement de test (Kind / K3s). | 
-| **Vague 4 : Déploiement Cluster & DNS** | **Agent 1**, **Agent 2**, **Agent 4** | Exécution du bootstrap sur le cluster cible : installation GPU Operator, Dynamo Platform (avec Grove & KAI), LiteLLM + Postgres, Ingress-NGINX, Cloudflare Tunnel et Control Plane. | `kubectl get pods -A` affiche 100 % des pods en état `Running` ; `https://llm.<domaine>/health/readiness` et `https://control.<domaine>/health` répondent `200 OK` via Cloudflare. | 
-| **Vague 5 : Recette E2E & Chaos Testing** | **Agent 5**, **Agent 0** | **Agent 5** : Déploie un modèle test via `POST https://control.<domaine>/api/v1/models/deploy`, vérifie le téléchargement NVMe, l'instanciation du CRD Dynamo, l'enregistrement automatique dans LiteLLM et lance un tir de charge streaming SSE. Simule la suppression (`DELETE`) et vérifie le drain sans erreur HTTP 502. | Zéro requête perdue lors de l'enregistrement et du retrait du modèle ; latence TTFT/TPOT conforme aux objectifs. | 
-
-> [!NOTE]
-> Statut au 2026-10-13 : vagues 1–3 livrées sous forme de squelette (Quality Gate de la vague 3 — build Docker + Kind/K3s — **non validée**). Les vagues de remédiation R1–R4 ci-dessous doivent être terminées **avant** de lancer les vagues 4 et 5.
-
-## 4bis. Plan de Remédiation (Vagues R1 → R4)
+### 4.1 Graphe des Vagues de Développement & Remédiation
 
 ```mermaid
-flowchart LR
-    R1["R1 Correctifs bloquants"] --> R2["R2 Planificateur & inventaire"]
-    R1 --> R3["R3 Sécurité, état & warmer"]
-    R2 --> R4["R4 Qualité & validation Kind"]
-    R3 --> R4
-    R4 --> W4["Vague 4 Cluster & DNS"]
-    W4 --> W5["Vague 5 E2E & Chaos"]
+flowchart TD
+    subgraph Squelette_Initial [Vagues Initiales 1-3]
+        W1[Vague 1: Contrats & Infra] --> W2[Vague 2: Cœur Parallèle]
+        W2 --> W3[Vague 3: Intégration API & Templates]
+    end
+
+    subgraph Remédiation [Vagues de Remédiation R1-R5]
+        W3 --> R1[R1: Correctifs Bloquants D1, D2]
+        W3 --> R2[R2: Planificateur Capacité & HF D4, D5, D9, D12]
+        R1 --> R3[R3: Sécurité Auth & Drain D7, D8]
+        R2 --> R4[R4: Packaging pyproject & CI D10, D11]
+        R3 --> R5[R5: Pré-Cluster & Conformité Réelle D3, D13, D14, D15]
+        R4 --> R5
+    end
+
+    subgraph Production [Vagues Réelles 4-5]
+        R5 --> W4[Vague 4: Déploiement Cluster Réel & Cloudflare]
+        W4 --> W5[Vague 5: Validation E2E Réelle & Charge Streaming]
+    end
 ```
 
-| **Vague** | **Agents** | **Tâches** | **Défauts** | **Quality Gate** |
+---
+
+### 4.2 Spécification de la Vague R5 (Pré-Cluster & Conformité Réelle)
+
+La vague **R5** constitue le point d'arrêt qualité indispensable avant de lancer le bootstrap sur machines bare-metal.
+
+| Vague | Agents | Tâches Assignées | Défauts Traités | Quality Gate & Critère d'Acceptation |
 |---|---|---|---|---|
-| **R1 : Correctifs bloquants** | 2, 3, 4 | **Agent 4** : supprimer les fallbacks mock implicites, mode mock opt-in via `CONTROL_PLANE_MOCK=1`, erreurs propagées et retry LiteLLM. **Agent 3** : séparer `dtype` / `quantization` dans le plan. **Agent 2** : extraire le CRD Dynamo réel, mettre à jour `contracts/dynamo_crd.schema.json` et réécrire les deux templates. | D1, D2, D3 | Tests prouvant qu'une kubeconfig absente ou un LiteLLM injoignable produit une erreur ; manifestes rendus validés contre le CRD réel via `kubeconform` ; aucun `--quantization=bf16/fp16` rendu possible. |
-| **R2 : Planificateur & inventaire** | 3, 4 | **Agent 3** : contrainte de capacité globale, réplicas dérivés des GPU libres et du profil, vérif VRAM par clique, pipeline parallel ou `InsufficientCapacityError` si TP=8 insuffisant ; inspecteur HF basé sur `model.safetensors.index.json` (`metadata.total_size`), support `head_dim` explicite, MLA, MoE, normalisation `torch_dtype`, erreur explicite pour modèle introuvable ; validation RFC 1123. **Agent 4** : inventaire réel via labels GFD (`nvidia.com/gpu.product`, `nvidia.com/gpu.memory`, `nvidia.com/gpu.count`) et GPU déjà alloués par les pods. | D4, D5, D9, D12 | Tests paramétrés (Llama 8B/70B, Qwen 72B, Mixtral, DeepSeek) : aucun plan ne dépasse la capacité ; 70B en bf16 sur 8×H100 → plan cohérent ; 405B sur 8×H100 → 409. |
-| **R3 : Sécurité, état & warmer** | 1, 3, 4 | **Agent 1** : Cloudflare Access sur `control.<domaine>`, secrets via Secret/ExternalSecrets (suppression des clés en clair de `gateway/`). **Agent 4** : authentification API (JWT Cloudflare Access ou token), état persistant dérivé des CR (labels/annotations + `status`), boucle de réconciliation au démarrage, drain piloté par `vllm:num_requests_running` (timeout configurable). **Agent 3** : `loader/warmer-job.yaml.j2`. **Agent 4** : lancer le Job warmer avant le DGD, attendre sa complétion, timeout readiness configurable (≥ 30 min pour les gros modèles). | D6, D7, D8 | Redémarrage du Control Plane sans perte d'état ; requête non authentifiée → 401 ; `git grep` sans secret ; enchaînement warmer → DGD → LiteLLM testé. |
-| **R4 : Qualité & validation Kind** | 0, 5 | **Agent 0** : `pyproject.toml`, suppression du symlink et des `sys.path`, version Python unique (3.12) en local et en CI. **Agent 5** : CI avec `ruff`, `mypy`, `kubeconform` (infra + manifestes rendus), build Docker ; test d'intégration sur Kind avec les CRD Dynamo installés et un faux backend OpenAI-compatible (sans GPU). | D10, D11 | CI verte avec tous les jobs ; le flux `POST /deploy` → CR créé → EndpointSlice prêt → LiteLLM enregistré → `DELETE` passe sur Kind. |
+| **R5 : Pré-Cluster & Conformité Réelle** | Agent 0, 1, 2, 3, 4, 5 | **Agent 2** : Refondre `dgd-disaggregated.yaml.j2` et `dgd-aggregated.yaml.j2` en `nvidia.com/v1beta1` (`components[]`, conteneur `main`, flags `--kv-transfer-config` et `DYN_ROUTER_MODE=kv`). Aligner strictement `contracts/dynamo_crd.schema.json`.<br>**Agent 4 & 5** : Intégrer l'application et la suppression des `ScaledObject` KEDA dans `DynamoReconciler.deploy_model` et `delete_model`.<br>**Agent 3 & 4** : Convertir `loader/warmer-job.yaml.j2` en Job indexé multi-nœuds ou DaemonSet NVMe.<br>**Agent 1 & 4** : Remplacer les secrets en clair de `gateway/litellm-deployment.yaml` par `secretKeyRef: inference-runtime`.<br>**Agent 0 & 5** : Intégrer `kubeconform` (avec le CRD v1beta1) et un test Kind en CI. Commiter les modules pipeline et web UI. | D3, D7 (reliquat), D11, D13, D14, D15 | 1. Validation syntaxique `kubeconform -schema-location ...` à 100 % sur les manifestes DGD v1beta1 rendus.<br>2. Test unitaire prouvant la création et la suppression conjointe du DGD et du `ScaledObject` KEDA.<br>3. `git grep -E 'sk-internal\|litellm_secret'` ne renvoie aucun résultat dans les manifests.<br>4. Job warmer généré avec un pod par nœud GPU cible.<br>5. CI complète verte avec Kind. |
 
-## 5. Algorithme Détaillé pour l'Agent 3 (Auto-Tuner & Calculateur VRAM)
+---
 
-L'Agent 3 doit implémenter les formules exactes suivantes dans `control-plane/autotuner/vram_calculator.py` pour éviter toute erreur `CUDA Out Of Memory` (OOM) au démarrage des pods Dynamo :
+### 4.3 Vagues 4 et 5 (Production & Validation Réelle)
 
-1. **Mémoire des Poids du Modèle (**$M_{\text{weights}}$**)** :
-   
+| Vague | Agents Actifs | Tâches Réelles | Critère de Validation (Quality Gate) |
+|---|---|---|---|
+| **Vague 4 : Déploiement Cluster & DNS** | Agent 1, Agent 2, Agent 4 | Exécution de `scripts/deploy_clusters.py` sur les clusters cibles : validation GPU Operator, pilotes RDMA/RoCE, installation Dynamo Platform v1beta1, Ingress-NGINX, Cloudflare Tunnel et passerelle LiteLLM. | `kubectl get pods -A` affiche 100 % des pods en état `Running` ; `https://llm.<domaine>/health/readiness` et `https://control.<domaine>/health` répondent `200 OK` via Cloudflare Access. |
+| **Vague 5 : Recette E2E Réelle & Tir de Charge** | Agent 5, Agent 0 | Déploiement d'un modèle réel (`POST /api/v1/models/deploy`), vérification du pré-chargement NVMe sur tous les nœuds, instanciation DGD v1beta1, enregistrement LiteLLM, et tir de charge streaming SSE. Test de résilience et retrait sans erreur HTTP 502. | Zéro requête perdue lors de l'enregistrement et du retrait du modèle ; TTFT et TPOT conformes aux SLAs sur GPU physiques. |
 
-   $$
-   M_{\text{weights}} = N_{\text{params}} \times B_{\text{dtype}} \times 1.05 \quad (\text{+5 \% pour les buffers d'embedding/LM head})
-   $$
+---
 
-   
-   où $B_{\text{dtype}} = 2$ octets (FP16/BF16), $1$ octet (FP8), ou $0.55$ octet (INT4/AWQ avec overhead de groupes).
+## 5. Algorithme Détaillé de l'Auto-Tuner (VRAM, GQA, MLA & Capacité)
 
-2. **Mémoire du KV-Cache par Token (**$M_{\text{kv\_token}}$**)** :
-   
+L'Agent 3 implémente les formules mathématiques exactes suivantes dans `control-plane/autotuner/vram_calculator.py` et `sla_planner.py` :
 
-   $$
-   M_{\text{kv\_token}} = 2 \times L \times H_{\text{kv}} \times D_{\text{head}} \times B_{\text{kv\_dtype}}
-   $$
+### 1. Mémoire des Poids ($M_{\text{weights}}$)
+$$M_{\text{weights}} = N_{\text{params}} \times B_{\text{dtype}} \times 1.05$$
+* $B_{\text{dtype}} = 2.0$ octets (BF16 / FP16), $1.0$ octet (FP8), ou $0.55$ octet (AWQ / INT4 avec overhead de quantification).
+* $N_{\text{params}}$ est extrait en priorité du champ `metadata.total_size` de `model.safetensors.index.json` (inclut nativement les architectures MoE). En cas d'absence, calcul déduit de `config.json` avec support de GQA ($2 \cdot h^2 + 2 \cdot h \cdot H_{\text{kv}} \cdot D_{\text{head}}$ par couche d'attention).
 
-   
-   où $L$ = `num_hidden_layers`, $H_{\text{kv}}$ = `num_key_value_heads` (support natif de Grouped-Query Attention - GQA), et $D_{\text{head}} = \text{hidden\_size} / \text{num\_attention\_heads}$.
+### 2. Mémoire du KV-Cache par Token ($M_{\text{kv\_token}}$)
+* **Architectures Standards et GQA** :
+  $$M_{\text{kv\_token}} = 2 \times L \times H_{\text{kv}} \times D_{\text{head}} \times B_{\text{kv\_dtype}}$$
+  avec $D_{\text{head}}$ extrait en priorité de `config.json` (ou $h / H_{\text{attn}}$), et $B_{\text{kv\_dtype}} = 1.0$ (FP8) ou $2.0$ (FP16).
+* **Architectures MLA (Multi-Head Latent Attention - DeepSeek)** :
+  $$M_{\text{kv\_token}} = L \times (\text{kv\_lora\_rank} + \text{qk\_rope\_head\_dim}) \times B_{\text{kv\_dtype}}$$
 
-3. **Allocation Totale et Calcul de `tensor_parallel_size` (TP)** :
-   
+### 3. Empreinte Totale et Sélection de $TP \in \{1, 2, 4, 8\}$
+$$M_{\text{total}} = \frac{M_{\text{weights}} + (M_{\text{kv\_token}} \times C_{\text{max}} \times B_{\text{seq}}) + M_{\text{cuda\_graphs}}}{\text{gpu\_memory\_utilization}}$$
+Le degré de parallélisme $TP$ est le plus petit entier dans $\{1, 2, 4, 8\}$ satisfaisant :
+$$TP \times \text{VRAM}_{\text{GPU}} \ge M_{\text{total}} \quad \text{et} \quad H_{\text{kv}} \pmod{TP} = 0$$
 
-   $$
-   M_{\text{total}} = \frac{M_{\text{weights}} + (M_{\text{kv\_token}} \times C_{\text{max}} \times B_{\text{seq}}) + M_{\text{cuda\_graphs}}}{\text{gpu\_memory\_utilization}}
-   $$
+### 4. Dimensionnement des Réplicas et Contraintes de Capacité
+* Le nombre de GPU requis pour une clique $c$ est : $GPU_c = \text{replicas}_c \times TP_c \times PP_c$.
+* Contrainte stricte de cluster : $\sum_c GPU_c \le GPU_{\text{disponibles}}$.
+* Si le modèle ne tient pas sur les GPU disponibles, `InsufficientCapacityError` est levée immédiatement.
+* La réduction de $TP$ sur la clique decode (`decode_tp = tp // 2`) n'est autorisée que si $M_{\text{total}}(\text{decode\_tp}) \le \text{decode\_tp} \times \text{VRAM}_{\text{GPU}}$.
 
-   
-   Le degré de parallélisme de tenseur $TP$ est choisi dans $\{1, 2, 4, 8\}$ tel que :
-   
+---
 
-   $$
-   TP = \min \left\{ p \in \{1, 2, 4, 8\} \;\middle\vert{}\; p \times \text{VRAM}_{\text{GPU\_unitaire}} \ge M_{\text{total}} \text{ et } H_{\text{kv}} \pmod p = 0 \right\}
-   $$
-
-   
-   *(Contrainte critique : le nombre de têtes KV* $H_{\text{kv}}$ *doit toujours être divisible par* $TP$*).*
-
-4. **Décision d'Architecture Agrégée vs Désagrégée (Prefill / Decode)** :
-
-   * Si le modèle requiert $TP \ge 2$ et que le profil demandé est `low-latency` ou `high-throughput` (et qu'au moins $2 \times TP$ GPU sont libres sur le cluster) : activer le mode **Disaggregated Serving** de Dynamo (`PrefillWorker` + `DecodeWorker`).
-
-   * Sinon : basculer en mode **Aggregated** (un seul groupe de workers combinant Prefill et Decode) pour économiser les GPU.
-
-5. **Contrainte de Capacité et Dimensionnement des Réplicas (ajout R2)** :
-
-   * Pour chaque clique $c$ : $GPU_c = \text{replicas}_c \times TP_c \times PP_c$, et $\sum_c GPU_c \le GPU_{\text{disponibles}}$.
-   * Le TP du decode ne peut être réduit que si $M_{\text{total}}(TP_{\text{decode}}) \le TP_{\text{decode}} \times \text{VRAM}_{\text{GPU}}$.
-   * Si aucun $TP \in \{1,2,4,8\}$ ne suffit : essayer $PP \in \{2, 4\}$ (multi-nœuds) ; sinon lever `InsufficientCapacityError`. **Jamais de fallback silencieux.**
-   * Répartition P/D initiale : ratio par défaut 1:2 (prefill:decode) en `high-throughput`, 1:1 en `low-latency`, ajusté ensuite par KEDA.
-
-6. **Source du Nombre de Paramètres (ajout R2)** : utiliser en priorité `metadata.total_size` de `model.safetensors.index.json` (taille réelle des poids, MoE compris). L'approximation à partir de `config.json` n'est qu'un dernier recours et doit tenir compte du GQA ($2 \cdot h^2 + 2 \cdot h \cdot H_{kv} \cdot D_{head}$ pour l'attention).
-
-7. **Cas Particuliers d'Architecture (ajout R2)** : `head_dim` explicite dans `config.json` prioritaire sur `hidden_size / num_attention_heads` ; MLA (DeepSeek) : KV-cache par token $= L \times (\text{kv\_lora\_rank} + \text{qk\_rope\_head\_dim}) \times B_{kv}$ ; normalisation `torch_dtype` (`bfloat16` → `bf16`, etc.).
-
-## 6. Prompts Système Prêts à l'Emploi pour chaque Agent
-
-Ces instructions peuvent être injectées directement dans votre orchestrateur multi-agents (Claude Code Subagents, LangGraph, CrewAI ou AutoGen) :
+## 6. Prompts Système Prêts à l'Emploi pour les Agents
 
 ### Prompt — Agent 1 (Infra, K8s & Cloudflare)
-
-> Tu es l'Agent Infrastructure & Réseau Kubernetes. Ton périmètre d'écriture exclusif est `infra/` et `scripts/`. Tu dois maintenir le script d'installation Ubuntu bare-metal (`bootstrap_inference_cluster.sh`) et les chartes Helm pour K3s, NVIDIA GPU Operator, Network Operator (RDMA), Ingress-NGINX, Cloudflare Tunnel (`cloudflared` en 2 réplicas) et `external-dns`. Aucun port entrant ne doit être ouvert sur l'hôte : tout le trafic externe passe par le tunnel Cloudflare vers `ingress-nginx-controller` en ClusterIP. Assure-toi que tous les Ingress supportent le streaming SSE longue durée (`proxy-read-timeout: 3600`, `proxy-buffering: "off"`).
-
-> **Ajouts R3 :** protège `control.<domaine>` par une application **Cloudflare Access** (politique d'identité + service token pour la CI). Aucun secret en clair dans le dépôt : utilise des `Secret` générés hors Git ou ExternalSecrets ; les fichiers d'exemple ne contiennent que des placeholders et sont nommés `*.example.yaml`.
+> Tu es l'Agent Infrastructure, Réseau Kubernetes et Déploiement Multi-Clusters. Ton périmètre exclusif est `infra/`, `scripts/` et `deploy/`. Tu maintiens les scripts bare-metal (`bootstrap_inference_cluster.sh`), l'orchestrateur multi-clusters (`deploy_clusters.py`), les charts Helm (GPU Operator, Network Operator RDMA, Ingress-NGINX) et Cloudflare Tunnel (`cloudflared`). Protège impérativement `control.<domaine>` par Cloudflare Access (Zero Trust avec Service Token). Ne commite aucun secret en clair dans `gateway/` ou `infra/` : utilise des références `secretKeyRef: inference-runtime`.
 
 ### Prompt — Agent 2 (NVIDIA Dynamo Specialist)
-
-> Tu es l'Agent spécialiste NVIDIA Dynamo et Kubernetes CRDs. Ton périmètre d'écriture exclusif est `dynamo/`. Tu dois produire les templates Jinja2 permettant de générer des ressources `DynamoGraphDeployment` et `DynamoGraphDeploymentRequest` compatibles avec le Dynamo Operator, Grove (`PodCliqueSet`) et KAI Scheduler. Respecte strictement le schéma d'entrée `contracts/model_spec.schema.json`. Monte systématiquement le volume `/mnt/nvme/model-cache` dans les pods workers (`HF_HOME=/mnt/nvme/model-cache`) pour éviter tout téléchargement redondant.
-
-> **Ajouts R1 :** ne jamais inventer de champ de CRD. Commence par extraire le schéma officiel de la version Dynamo épinglée et valide chaque rendu avec `kubeconform` contre ce schéma. Utilise `--dtype` pour la précision native et n'émets `--quantization` que si le plan en fournit une (`fp8`, `awq`, `gptq`).
+> Tu es l'Agent spécialiste NVIDIA Dynamo et Kubernetes CRDs. Ton périmètre exclusif est `dynamo/`. Tu dois concevoir les templates Jinja2 (`dgd-disaggregated.yaml.j2`, `dgd-aggregated.yaml.j2`) en respectant strictement le schéma canonique **`nvidia.com/v1beta1`** de Dynamo v1.5+. Utilise `spec.components` avec conteneur `main` exécutant `python3 -m dynamo.vllm`, injecte les arguments `--disaggregation-mode prefill|decode`, configure NIXL via `--kv-transfer-config` et positionne `DYN_ROUTER_MODE=kv`. Ne rétrograde jamais vers `v1alpha1` et n'assouplis pas les schémas dans `contracts/`.
 
 ### Prompt — Agent 3 (Auto-Tuner & Model Loader)
-
-> Tu es l'Agent responsable du dimensionnement mathématique des modèles et du pré-chargement des poids. Ton périmètre d'écriture exclusif est `control-plane/autotuner/` et `loader/`. Implémente la récupération sans téléchargement des fichiers `config.json` et `model.safetensors.index.json` depuis Hugging Face ou S3, calcule au mégaoctet près l'empreinte VRAM des poids, du KV-Cache (en tenant compte de GQA/MLA) et des graphes CUDA, puis détermine automatiquement `tensor_parallel_size` (en vérifiant que `num_key_value_heads % tp == 0`), la quantification (`fp16`, `fp8`, `awq`) et le ratio de réplicas Prefill/Decode. Écris également le Job Kubernetes `model_warmer.py` utilisant `huggingface_hub` avec `hf_transfer` activé pour saturer la bande passante vers le disque NVMe.
-
-> **Ajouts R2 :** le planificateur doit respecter la contrainte de capacité globale (§5.5) et lever `InsufficientCapacityError` plutôt que de dégrader. Aucun fallback silencieux vers un profil connu : un modèle introuvable est une erreur. Fournis également `loader/warmer-job.yaml.j2` (Job K8s avec `nodeSelector` sur les nœuds cibles, volume NVMe, `HF_TOKEN` depuis un Secret).
+> Tu es l'Agent responsable du dimensionnement mathématique des modèles et du pré-chargement NVMe. Ton périmètre exclusif est `control-plane/autotuner/` et `loader/`. Implémente l'inspection sans téléchargement depuis HF (`safetensors.index.json` et `config.json`), calcule la VRAM exacte (GQA, MLA, MoE) et applique la contrainte de capacité stricte du cluster (lève `InsufficientCapacityError` en cas de dépassement). Dans `loader/`, fournis un Job K8s indexé (`completionMode: Indexed` avec anti-affinité de pod) ou un DaemonSet pour garantir que le cache `/mnt/nvme/model-cache` est peuplé sur **tous** les nœuds GPU cibles avant le démarrage des pods Dynamo.
 
 ### Prompt — Agent 4 (Control Plane API & LiteLLM Sync)
-
-> Tu es l'Agent Backend Control Plane & Passerelle LiteLLM. Ton périmètre d'écriture exclusif est `control-plane/api/` et `gateway/`. Développe une API FastAPI asynchrone exposant :
->
-> * `POST /api/v1/models/deploy` : appelle le module `autotuner` (Agent 3), lance le Job de pré-chargement NVMe, génère le manifeste `DynamoGraphDeployment` (Agent 2) et l'applique via `kubernetes_asyncio`.
->
-> * Une tâche de fond (Kubernetes Watcher sur les `EndpointSlices`) qui détecte quand le Service Frontend Dynamo possède au moins un endpoint `ready=true`, puis enregistre immédiatement le modèle dans LiteLLM via `POST /model/new`.
->
-> * `DELETE /api/v1/models/{model_name}` : retire d'abord le modèle de LiteLLM via `POST /model/delete`, attend que le drain soit effectif (`vllm:num_requests_running == 0`, timeout configurable — 120 s par défaut), puis supprime le `DynamoGraphDeployment` sur Kubernetes.
-
-> **Ajouts R1/R3 :** aucun fallback mock implicite (mode mock uniquement via `CONTROL_PLANE_MOCK=1`, interdit in-cluster). L'état des déploiements est dérivé des CR Kubernetes (labels/annotations + `status`), jamais d'un dictionnaire en mémoire ; réconcilie au démarrage. Toutes les routes `/api/v1/*` exigent une authentification. L'inventaire GPU est lu depuis les labels GFD et les allocations réelles. Le Job warmer doit être terminé avant l'application du DGD.
+> Tu es l'Agent Backend Control Plane & Passerelle LiteLLM. Ton périmètre exclusif est `control-plane/api/` et `gateway/`. Tu maintiens l'API FastAPI et la console Web SPA (`control-plane/api/web/`). Dans `dynamo_reconciler.py`, orchestre la séquence complète : 1) Exécuter et attendre la complétion du Job warmer multi-nœuds, 2) Appliquer le CRD DGD v1beta1, 3) Rendre et appliquer le `ScaledObject` KEDA (`keda-scaledobjects.yaml.j2`), 4) Surveiller l'`EndpointSlice` frontend et enregistrer le modèle dans LiteLLM Proxy avec retries exponentiels. Lors d'un `DELETE`, effectue le retrait LiteLLM, draine les requêtes actives, puis supprime le `ScaledObject` et le DGD. Exige une authentification Bearer ou Cloudflare Access sur `/api/v1/*`.
 
 ### Prompt — Agent 5 (Autoscaling KEDA & QA E2E)
-
-> Tu es l'Agent Observabilité, Autoscaling et Assurance Qualité. Ton périmètre d'écriture exclusif est `monitoring/` et `tests/`. Crée les définitions `ScaledObject` KEDA qui scalent indépendamment les cliques `PrefillWorker` (selon la longueur de la file d'attente `vllm:num_requests_waiting`) et `DecodeWorker` (selon la saturation du KV-Cache `vllm:gpu_cache_usage_perc`). Écris la suite de tests `pytest` couvrant les calculs VRAM de l'Agent 3, la validité des manifestes YAML de l'Agent 2 et le test d'intégration E2E complet.
->
-> **Ajouts R4 :** distingue clairement les tests unitaires (mocks autorisés) des tests d'intégration (Kind + CRD Dynamo réels + faux backend OpenAI-compatible). La CI doit exécuter `ruff`, `mypy`, `kubeconform` sur `infra/` et sur les manifestes rendus, le build Docker du Control Plane, et cibler la même version de Python qu'en local.
+> Tu es l'Agent Observabilité, Autoscaling KEDA et Assurance Qualité. Ton périmètre exclusif est `monitoring/` et `tests/`. Crée les définitions `ScaledObject` KEDA ciblant le `DynamoGraphDeploymentScalingAdapter` (`nvidia.com/v1beta1`) pour scaler indépendamment Prefill (requêtes en attente) et Decode (saturation KV-Cache). Maintiens la suite de tests `pytest` et assure une validation rigoureuse en CI : exécution de `kubeconform` avec les schémas officiels Dynamo v1beta1, vérifications `ruff` et `mypy`, et tests d'intégration automatisés sur cluster Kind éphémère.

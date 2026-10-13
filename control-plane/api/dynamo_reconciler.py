@@ -80,6 +80,10 @@ class DynamoReconciler:
         """Renders the model warmer Job from loader/warmer-job.yaml.j2 (D6 fix)."""
         template = self.jinja_env.get_template("warmer-job.yaml.j2")
         context = {**plan, "namespace": namespace}
+        if os.environ.get("MODEL_WARMER_IMAGE"):
+            context["warmer_image"] = os.environ["MODEL_WARMER_IMAGE"]
+        if os.environ.get("MODEL_WARMER_IMAGE_PULL_SECRET"):
+            context["warmer_image_pull_secret"] = os.environ["MODEL_WARMER_IMAGE_PULL_SECRET"]
         rendered_yaml = template.render(context)
         return yaml.safe_load(rendered_yaml)
 
@@ -198,6 +202,9 @@ class DynamoReconciler:
             return {
                 "name": deployment_name,
                 "model_id": cr.get("spec", {}).get("model", cached.get("model_id")),
+                "namespace": cr.get("metadata", {}).get("namespace", namespace),
+                "serving_mode": cr.get("metadata", {}).get("labels", {}).get("dynamo.nvidia.com/serving-mode"),
+                "plan": cached.get("plan"),
                 "status": cached.get("status", "running"),
                 "ready": cached.get("ready", True),
                 "k8s_cr": cr,
@@ -215,6 +222,7 @@ class DynamoReconciler:
                 {
                     "name": name,
                     "model_id": cr.get("spec", {}).get("model", cached.get("model_id")),
+                    "serving_mode": cr.get("metadata", {}).get("labels", {}).get("dynamo.nvidia.com/serving-mode"),
                     "status": cached.get("status", "running"),
                     "ready": cached.get("ready", True),
                 }
