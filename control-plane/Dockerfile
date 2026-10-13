@@ -10,14 +10,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt /app/requirements.txt
+COPY control-plane/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application and templates
-COPY autotuner/ /app/autotuner/
-COPY api/ /app/api/
-COPY ../contracts/ /contracts/
-COPY ../dynamo/templates/ /dynamo/templates/
+# Copy application, contracts, and templates
+COPY control-plane/autotuner/ /app/autotuner/
+COPY control-plane/api/ /app/api/
+COPY contracts/ /contracts/
+COPY dynamo/templates/ /dynamo/templates/
+COPY loader/ /loader/
+COPY pyproject.toml /app/pyproject.toml
+
+RUN pip install --no-cache-dir -e .
 
 EXPOSE 8000
 

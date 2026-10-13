@@ -2,26 +2,17 @@
 Pytest configuration and shared fixtures for unit and integration testing.
 """
 
-import sys
-import os
 import pytest
+from api.dynamo_reconciler import DynamoReconciler
+from api.k8s_client import K8sClient
+from api.litellm_sync import LiteLLMSync
+from autotuner.vram_calculator import ModelArchitectureSpecs, VRAMCalculator
 
-# Ensure repository root and control-plane directory are in python path
-ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-CONTROL_PLANE_DIR = os.path.join(ROOT_DIR, "control-plane")
-for p in (ROOT_DIR, CONTROL_PLANE_DIR):
-    if p not in sys.path:
-        sys.path.insert(0, p)
-
-from control_plane.autotuner.vram_calculator import VRAMCalculator, ModelArchitectureSpecs
-from control_plane.autotuner.sla_planner import SLAPlanner, DeployRequest, ClusterInventory, GpuPool
-from control_plane.api.k8s_client import K8sClient
-from control_plane.api.litellm_sync import LiteLLMSync
-from control_plane.api.dynamo_reconciler import DynamoReconciler
 
 @pytest.fixture
 def vram_calc():
     return VRAMCalculator()
+
 
 @pytest.fixture
 def llama_70b_specs():
@@ -35,6 +26,7 @@ def llama_70b_specs():
         default_dtype="bf16",
     )
 
+
 @pytest.fixture
 def llama_8b_specs():
     return ModelArchitectureSpecs(
@@ -47,14 +39,17 @@ def llama_8b_specs():
         default_dtype="bf16",
     )
 
+
 @pytest.fixture
 def mock_k8s():
     return K8sClient(mock_mode=True)
+
 
 @pytest.fixture
 def mock_litellm():
     return LiteLLMSync(mock_mode=True)
 
+
 @pytest.fixture
 def reconciler(mock_k8s, mock_litellm):
-    return DynamoReconciler(k8s_client=mock_k8s, litellm_sync=mock_litellm, drain_seconds=0)
+    return DynamoReconciler(k8s_client=mock_k8s, litellm_sync=mock_litellm, drain_timeout_seconds=0)

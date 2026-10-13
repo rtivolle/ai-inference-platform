@@ -3,20 +3,23 @@ Unit tests validating Jinja2 rendering of DynamoGraphDeployment Custom Resources
 """
 
 import json
+
 import jsonschema
 import pytest
-from control_plane.api.dynamo_reconciler import DynamoReconciler
+
 
 @pytest.fixture
 def crd_schema():
     with open("contracts/dynamo_crd.schema.json", "r", encoding="utf-8") as f:
         return json.load(f)
 
+
 def test_render_disaggregated_crd(reconciler, crd_schema):
     sample_plan = {
         "model_id": "meta-llama/Llama-3.3-70B-Instruct",
         "deployment_name": "llama-3-3-70b",
         "serving_mode": "disaggregated",
+        "dtype": "bfloat16",
         "quantization": "fp8",
         "max_model_len": 32768,
         "gpu_memory_utilization": 0.90,
@@ -64,19 +67,23 @@ def test_render_disaggregated_crd(reconciler, crd_schema):
     assert services["PrefillWorker"]["replicas"] == 2
     assert services["PrefillWorker"]["resources"]["limits"]["nvidia.com/gpu"] == 4
     assert "--tensor-parallel-size=4" in services["PrefillWorker"]["extraArgs"]
+    assert "--dtype=bfloat16" in services["PrefillWorker"]["extraArgs"]
     assert "--quantization=fp8" in services["PrefillWorker"]["extraArgs"]
 
     assert "DecodeWorker" in services
     assert services["DecodeWorker"]["replicas"] == 4
     assert services["DecodeWorker"]["resources"]["limits"]["nvidia.com/gpu"] == 2
     assert "--tensor-parallel-size=2" in services["DecodeWorker"]["extraArgs"]
+    assert "--dtype=bfloat16" in services["DecodeWorker"]["extraArgs"]
+
 
 def test_render_aggregated_crd(reconciler, crd_schema):
     sample_plan = {
         "model_id": "meta-llama/Meta-Llama-3-8B-Instruct",
         "deployment_name": "llama-3-8b",
         "serving_mode": "aggregated",
-        "quantization": "bf16",
+        "dtype": "bfloat16",
+        "quantization": None,  # None quantization must NOT render --quantization
         "max_model_len": 8192,
         "gpu_memory_utilization": 0.90,
         "estimated_vram_gb_per_replica": 18.5,
@@ -104,3 +111,6 @@ def test_render_aggregated_crd(reconciler, crd_schema):
     assert services["Worker"]["replicas"] == 2
     assert services["Worker"]["resources"]["limits"]["nvidia.com/gpu"] == 1
     assert "--tensor-parallel-size=1" in services["Worker"]["extraArgs"]
+    assert "--dtype=bfloat16" in services["Worker"]["extraArgs"]
+    # Ensure no --quantization argument is emitted when quantization is None
+    assert not any("--quantization" in arg for arg in services["Worker"]["extraArgs"])

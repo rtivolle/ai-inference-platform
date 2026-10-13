@@ -7,9 +7,8 @@ litellm_settings:
   request_timeout: 600
 
 general_settings:
-  master_key: "internal-master-key"
-  database_url: "postgresql://litellm:litellm_secret@postgres-service.ai-gateway.svc.cluster.local:5432/litellm"
-  # redis_url: "redis://redis-service.ai-gateway.svc.cluster.local:6379/0"
+  master_key: "os.environ/LITELLM_MASTER_KEY"
+  database_url: "os.environ/DATABASE_URL"
 
 router_settings:
   routing_strategy: "least-busy"

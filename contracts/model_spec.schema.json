@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nvidia.com/schemas/model_spec.schema.json",
   "title": "ModelDeploymentSpecification",
-  "description": "Contracts for Model Deployment Request, Cluster Inventory, and Auto-Tuned Deployment Plan",
+  "description": "Contracts for Model Deployment Request, Cluster Inventory, and Auto-Tuned Deployment Plan (R1/R2 Revision)",
   "$defs": {
     "DeployRequest": {
       "type": "object",
@@ -14,19 +14,23 @@
         },
         "deployment_name": {
           "type": "string",
-          "description": "Kubernetes safe DNS name for the deployment. Generated if omitted.",
-          "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+          "description": "RFC 1123 compliant DNS name for the deployment. Generated if omitted.",
+          "pattern": "^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$"
         },
         "profile": {
           "type": "string",
           "enum": ["low-latency", "high-throughput", "balanced"],
-          "default": "balanced",
-          "description": "SLA performance profile targeting TTFT or throughput"
+          "default": "balanced"
+        },
+        "dtype": {
+          "type": "string",
+          "enum": ["auto", "bfloat16", "float16", "bf16", "fp16"],
+          "default": "auto"
         },
         "quantization": {
-          "type": "string",
-          "enum": ["auto", "fp16", "bf16", "fp8", "awq", "int4"],
-          "default": "auto"
+          "type": ["string", "null"],
+          "enum": ["fp8", "awq", "gptq", null],
+          "default": null
         },
         "max_model_len": {
           "type": "integer",
@@ -42,7 +46,7 @@
         "target_concurrency": {
           "type": "integer",
           "minimum": 1,
-          "default": 32
+          "default": 16
         }
       },
       "additionalProperties": false
@@ -109,29 +113,36 @@
     },
     "KVCacheTransferSpec": {
       "type": "object",
-      "required": ["protocol"],
+      "required": ["protocol", "engine"],
       "properties": {
         "protocol": { "type": "string", "enum": ["rdma", "tcp"] },
-        "engine": { "type": "string" },
-        "Engine": { "type": "string" }
+        "engine": { "type": "string", "enum": ["nixl", "ucx", "default"] }
       },
-      "additionalProperties": true
+      "additionalProperties": false
     },
     "DeploymentPlan": {
       "type": "object",
       "required": [
         "model_id",
+        "deployment_name",
         "serving_mode",
-        "quantization",
+        "dtype",
         "max_model_len",
         "gpu_memory_utilization",
         "estimated_vram_gb_per_replica"
       ],
       "properties": {
         "model_id": { "type": "string" },
-        "deployment_name": { "type": "string" },
+        "deployment_name": {
+          "type": "string",
+          "pattern": "^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$"
+        },
         "serving_mode": { "type": "string", "enum": ["disaggregated", "aggregated"] },
-        "quantization": { "type": "string", "enum": ["fp16", "bf16", "fp8", "awq", "int4", "none"] },
+        "dtype": { "type": "string", "enum": ["bfloat16", "float16", "auto", "bf16", "fp16"] },
+        "quantization": {
+          "type": ["string", "null"],
+          "enum": ["fp8", "awq", "gptq", null]
+        },
         "max_model_len": { "type": "integer" },
         "gpu_memory_utilization": { "type": "number", "minimum": 0.1, "maximum": 1.0 },
         "estimated_vram_gb_per_replica": { "type": "number" },

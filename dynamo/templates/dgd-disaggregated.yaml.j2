@@ -42,7 +42,10 @@ spec:
         {% if prefill_clique.pipeline_parallel_size and prefill_clique.pipeline_parallel_size > 1 %}
         - "--pipeline-parallel-size={{ prefill_clique.pipeline_parallel_size }}"
         {% endif %}
+        - "--dtype={{ dtype }}"
+        {% if quantization %}
         - "--quantization={{ quantization }}"
+        {% endif %}
         - "--max-model-len={{ max_model_len }}"
         - "--gpu-memory-utilization={{ gpu_memory_utilization }}"
         {% if prefill_clique.max_num_batched_tokens %}
@@ -71,7 +74,10 @@ spec:
         {% if decode_clique.pipeline_parallel_size and decode_clique.pipeline_parallel_size > 1 %}
         - "--pipeline-parallel-size={{ decode_clique.pipeline_parallel_size }}"
         {% endif %}
+        - "--dtype={{ dtype }}"
+        {% if quantization %}
         - "--quantization={{ quantization }}"
+        {% endif %}
         - "--max-model-len={{ max_model_len }}"
         - "--gpu-memory-utilization={{ gpu_memory_utilization }}"
         {% if decode_clique.max_num_seqs %}

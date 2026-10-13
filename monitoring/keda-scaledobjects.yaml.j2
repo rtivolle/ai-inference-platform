@@ -1,5 +1,5 @@
 # KEDA ScaledObjects for NVIDIA Dynamo Workload
-# PrefillWorker and DecodeWorker are scaled independently based on distinct operational bottlenecks.
+# Prefill and Decode are scaled independently via DynamoGraphDeploymentScalingAdapter (DGDSA)
 ---
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
@@ -12,14 +12,13 @@ metadata:
     clique: prefill
 spec:
   scaleTargetRef:
-    apiVersion: nvidia.com/v1alpha1
-    kind: DynamoGraphDeployment
-    name: "{{ deployment_name }}"
-    envSourceContainerName: PrefillWorker
-  pollingInterval: 5
-  cooldownPeriod: 30
-  minReplicaCount: {{ prefill_min_replicas | default(1) }}
-  maxReplicaCount: {{ prefill_max_replicas | default(8) }}
+    apiVersion: nvidia.com/v1beta1
+    kind: DynamoGraphDeploymentScalingAdapter
+    name: "{{ deployment_name }}-prefill"
+  pollingInterval: 15
+  cooldownPeriod: 120
+  minReplicaCount: {{ prefill_clique.replicas }}
+  maxReplicaCount: {{ prefill_max_replicas | default(prefill_clique.replicas * 4) }}
   advanced:
     horizontalPodAutoscalerConfig:
       behavior:
@@ -38,10 +37,18 @@ spec:
   triggers:
     - type: prometheus
       metadata:
-        serverAddress: http://prometheus-k8s.monitoring.svc.cluster.local:9090
-        metricName: vllm_num_requests_waiting
-        query: sum(vllm:num_requests_waiting{model_name="{{ model_id }}"})
-        threshold: "4" # Trigger prefill scaling when queue exceeds 4 waiting requests
+        serverAddress: http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
+        metricName: dynamo_ttft_p95_seconds
+        threshold: "0.35"
+        query: |
+          histogram_quantile(0.95, sum(rate(dynamo_frontend_time_to_first_token_seconds_bucket{dynamo_namespace="{{ namespace | default('dynamo-workloads') }}-{{ deployment_name }}"}[2m])) by (le))
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
+        metricName: vllm_requests_waiting_prefill
+        threshold: "5"
+        query: |
+          sum(vllm:num_requests_waiting{namespace="{{ namespace | default('dynamo-workloads') }}", dynamo_component="prefill", model_name="{{ model_id }}"})
 ---
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
@@ -54,14 +61,13 @@ metadata:
     clique: decode
 spec:
   scaleTargetRef:
-    apiVersion: nvidia.com/v1alpha1
-    kind: DynamoGraphDeployment
-    name: "{{ deployment_name }}"
-    envSourceContainerName: DecodeWorker
-  pollingInterval: 5
-  cooldownPeriod: 45
-  minReplicaCount: {{ decode_min_replicas | default(2) }}
-  maxReplicaCount: {{ decode_max_replicas | default(16) }}
+    apiVersion: nvidia.com/v1beta1
+    kind: DynamoGraphDeploymentScalingAdapter
+    name: "{{ deployment_name }}-decode"
+  pollingInterval: 15
+  cooldownPeriod: 180
+  minReplicaCount: {{ decode_clique.replicas }}
+  maxReplicaCount: {{ decode_max_replicas | default(decode_clique.replicas * 4) }}
   advanced:
     horizontalPodAutoscalerConfig:
       behavior:
@@ -80,7 +86,8 @@ spec:
   triggers:
     - type: prometheus
       metadata:
-        serverAddress: http://prometheus-k8s.monitoring.svc.cluster.local:9090
+        serverAddress: http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
         metricName: vllm_gpu_cache_usage_perc
-        query: max(vllm:gpu_cache_usage_perc{model_name="{{ model_id }}"})
-        threshold: "0.85" # Trigger decode scaling when KV-cache saturation exceeds 85%
+        threshold: "0.80"
+        query: |
+          avg(vllm:gpu_cache_usage_perc{namespace="{{ namespace | default('dynamo-workloads') }}", dynamo_component="decode", model_name="{{ model_id }}"})

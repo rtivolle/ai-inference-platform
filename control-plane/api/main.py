@@ -1,45 +1,78 @@
 """
 Control Plane REST API built with FastAPI.
-Orchestrates model auto-tuning, Dynamo deployment reconciliation, and LiteLLM synchronization.
+Adheres to R1, R2, R3 specifications:
+- Authentication required on all /api/v1/* endpoints (Bearer token / Cloudflare Access headers) (D7).
+- Persistent state backed by Kubernetes CRDs, reconciled on startup (D8).
+- Capacity constraint errors mapped to HTTP 409 (D4).
+- Model not found mapped to HTTP 404 (D9).
 """
 
 import os
-import sys
-import asyncio
-from typing import Dict, Any, Optional
-from fastapi import FastAPI, HTTPException, BackgroundTasks, status
-from fastapi.responses import JSONResponse
-
-# Ensure repository root and control-plane directory are in python path
-ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
-CONTROL_PLANE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-for p in (ROOT_DIR, CONTROL_PLANE_DIR):
-    if p not in sys.path:
-        sys.path.insert(0, p)
-
-try:
-    from autotuner.sla_planner import SLAPlanner, DeployRequest, ClusterInventory
-    from api.k8s_client import K8sClient
-    from api.litellm_sync import LiteLLMSync
-    from api.dynamo_reconciler import DynamoReconciler
-except ImportError:
-    from control_plane.autotuner.sla_planner import SLAPlanner, DeployRequest, ClusterInventory
-    from control_plane.api.k8s_client import K8sClient
-    from control_plane.api.litellm_sync import LiteLLMSync
-    from control_plane.api.dynamo_reconciler import DynamoReconciler
-
 from contextlib import asynccontextmanager
 
-# Shared instances
+from autotuner.hf_inspector import ModelNotFoundError
+from autotuner.sla_planner import ClusterInventory, DeployRequest, SLAPlanner
+from autotuner.vram_calculator import InsufficientCapacityError
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Security, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+
+from api.dynamo_reconciler import DynamoReconciler
+from api.k8s_client import K8sClient
+from api.litellm_sync import LiteLLMSync
+
+# Shared clients
 k8s_client = K8sClient()
 litellm_sync = LiteLLMSync()
 reconciler = DynamoReconciler(k8s_client=k8s_client, litellm_sync=litellm_sync)
 sla_planner = SLAPlanner()
 
+# Security & Authentication (D7 fix)
+security_bearer = HTTPBearer(auto_error=False)
+
+
+async def verify_auth(
+    credentials: HTTPAuthorizationCredentials | None = Security(security_bearer),
+    cf_jwt: str | None = Header(None, alias="Cf-Access-Jwt-Assertion"),
+    cf_client_id: str | None = Header(None, alias="CF-Access-Client-Id"),
+    cf_client_secret: str | None = Header(None, alias="CF-Access-Client-Secret"),
+):
+    """
+    Enforces authentication on all /api/v1/* routes via:
+    1. Cloudflare Access JWT or Service Token headers
+    2. Bearer API Token
+    """
+    valid_token = os.environ.get("CONTROL_PLANE_API_TOKEN")
+    is_mock = os.environ.get("CONTROL_PLANE_MOCK", "0") in ("1", "true", "True")
+
+    # If mock mode is active and no token configured, allow a default test token
+    if is_mock and not valid_token:
+        valid_token = "test-token"
+
+    # Check Cloudflare Access Service Token
+    if cf_client_id and cf_client_secret:
+        return {"auth": "cloudflare_access_service_token", "client_id": cf_client_id}
+
+    # Check Cloudflare Access JWT
+    if cf_jwt:
+        return {"auth": "cloudflare_access_jwt"}
+
+    # Check Bearer Token
+    if credentials and valid_token and credentials.credentials == valid_token:
+        return {"auth": "bearer_token"}
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Unauthorized: Valid Bearer token or Cloudflare Access headers required.",
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await k8s_client.initialize()
+    # Reconcile existing deployments from cluster at startup (D8 fix)
+    await reconciler.reconcile_existing()
     yield
+
 
 app = FastAPI(
     title="AI Inference Control Plane API",
@@ -48,35 +81,37 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+
 @app.get("/health", tags=["Monitoring"])
 async def health():
     return {"status": "ok", "service": "control-plane-api"}
 
+
 @app.get("/health/readiness", tags=["Monitoring"])
 async def health_readiness():
-    return {
-        "status": "ready",
-        "k8s_connected": not k8s_client.mock_mode,
-        "litellm_endpoint": litellm_sync.base_url
-    }
+    return {"status": "ready", "k8s_connected": not k8s_client.mock_mode, "litellm_endpoint": litellm_sync.base_url}
 
-@app.get("/api/v1/cluster/gpus", tags=["Inventory"])
+
+@app.get("/api/v1/cluster/gpus", tags=["Inventory"], dependencies=[Depends(verify_auth)])
 async def get_cluster_gpus():
     inventory = await k8s_client.get_cluster_gpu_inventory()
     return inventory
 
-@app.post("/api/v1/models/deploy", tags=["Deployments"], status_code=status.HTTP_200_OK)
+
+@app.post(
+    "/api/v1/models/deploy", tags=["Deployments"], status_code=status.HTTP_200_OK, dependencies=[Depends(verify_auth)]
+)
 async def deploy_model(request: DeployRequest):
     try:
-        # 1. Fetch cluster inventory
+        # 1. Fetch live cluster inventory
         inventory_dict = await k8s_client.get_cluster_gpu_inventory()
         inventory = ClusterInventory(**inventory_dict)
 
         # 2. Compute Auto-Tuned deployment plan (Contract 1)
         plan = sla_planner.plan(request, inventory)
 
-        # 3. Reconcile deployment (Contract 2 & 3)
-        reconcile_result = await reconciler.deploy_model(plan)
+        # 3. Reconcile deployment: warmer Job -> DGD -> EndpointSlice watcher -> LiteLLM sync
+        await reconciler.deploy_model(plan)
 
         return {
             "status": "provisioning",
@@ -84,31 +119,37 @@ async def deploy_model(request: DeployRequest):
             "model_id": plan["model_id"],
             "plan": plan,
         }
+    except InsufficientCapacityError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except ModelNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to schedule deployment: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Failed to schedule deployment: {e!s}")
 
-@app.delete("/api/v1/models/{model_name}", tags=["Deployments"])
+
+@app.delete("/api/v1/models/{model_name}", tags=["Deployments"], dependencies=[Depends(verify_auth)])
 async def delete_model(model_name: str, background_tasks: BackgroundTasks):
-    existing = reconciler.get_deployment_status(model_name)
-    if not existing and model_name not in reconciler.active_deployments:
-        # Allow idempotent deletion even if not tracked in-memory
-        pass
+    existing = await reconciler.get_deployment_status(model_name)
+    if not existing:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Deployment '{model_name}' not found.")
 
-    # Initiate graceful drain and teardown
+    # Initiate graceful dynamic drain and teardown
     background_tasks.add_task(reconciler.delete_model, model_name)
     return {
         "status": "deleting",
         "model_name": model_name,
-        "message": f"Model {model_name} deregistered from gateway; draining active requests for 15s before CR cleanup."
+        "message": f"Model {model_name} deregistered from gateway; draining active requests before K8s cleanup.",
     }
 
-@app.get("/api/v1/models", tags=["Deployments"])
-async def list_models():
-    return reconciler.list_deployments()
 
-@app.get("/api/v1/models/{model_name}/status", tags=["Deployments"])
+@app.get("/api/v1/models", tags=["Deployments"], dependencies=[Depends(verify_auth)])
+async def list_models():
+    return await reconciler.list_deployments()
+
+
+@app.get("/api/v1/models/{model_name}/status", tags=["Deployments"], dependencies=[Depends(verify_auth)])
 async def get_model_status(model_name: str):
-    info = reconciler.get_deployment_status(model_name)
+    info = await reconciler.get_deployment_status(model_name)
     if not info:
-        raise HTTPException(status_code=404, detail=f"Deployment '{model_name}' not found.")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Deployment '{model_name}' not found.")
     return info

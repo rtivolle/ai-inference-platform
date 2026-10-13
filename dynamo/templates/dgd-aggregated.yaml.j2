@@ -38,7 +38,10 @@ spec:
         {% if worker_clique.pipeline_parallel_size and worker_clique.pipeline_parallel_size > 1 %}
         - "--pipeline-parallel-size={{ worker_clique.pipeline_parallel_size }}"
         {% endif %}
+        - "--dtype={{ dtype }}"
+        {% if quantization %}
         - "--quantization={{ quantization }}"
+        {% endif %}
         - "--max-model-len={{ max_model_len }}"
         - "--gpu-memory-utilization={{ gpu_memory_utilization }}"
         {% if worker_clique.max_num_seqs %}

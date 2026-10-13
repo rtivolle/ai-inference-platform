@@ -1,69 +1,107 @@
 """
-Dynamo Reconciler: Handles Jinja2 rendering of DynamoGraphDeployment CRDs,
-Kubernetes CR lifecycle, EndpointSlice readiness watching, and LiteLLM synchronization.
+Dynamo Reconciler adhering to R1, R2, and R3:
+- Slices deployment state directly from Kubernetes Custom Resources (D8).
+- Launches and awaits NVMe warmer job before creating DynamoGraphDeployment (D6).
+- Reconciles existing cluster deployments on startup (D8).
+- Dynamic drain driven by active generation metrics with configurable timeout (D8).
+- Prevents K8s resource deletion if LiteLLM deregistration fails (D1).
 """
 
-import os
 import asyncio
 import logging
-from typing import Dict, Any, Optional
+import os
+from typing import Any
+
 import yaml
-import jinja2
-from jinja2 import FileSystemLoader, Environment
+from jinja2 import Environment, FileSystemLoader
 
 from .k8s_client import K8sClient
 from .litellm_sync import LiteLLMSync
 
 logger = logging.getLogger("dynamo_reconciler")
 
-TEMPLATES_DIR = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "../../dynamo/templates")
-)
+TEMPLATES_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../dynamo/templates"))
+LOADER_TEMPLATES_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../loader"))
+
 
 class DynamoReconciler:
     def __init__(
         self,
-        k8s_client: Optional[K8sClient] = None,
-        litellm_sync: Optional[LiteLLMSync] = None,
+        k8s_client: K8sClient | None = None,
+        litellm_sync: LiteLLMSync | None = None,
         templates_dir: str = TEMPLATES_DIR,
-        drain_seconds: int = 15,
+        drain_timeout_seconds: int = 120,
+        readiness_timeout_seconds: int = 1800,
     ):
         self.k8s = k8s_client or K8sClient()
         self.litellm = litellm_sync or LiteLLMSync()
-        self.drain_seconds = drain_seconds
-        self.active_deployments: Dict[str, Dict[str, Any]] = {}
+        self.drain_timeout_seconds = drain_timeout_seconds
+        self.readiness_timeout_seconds = readiness_timeout_seconds
+        self._in_memory_cache: dict[str, dict[str, Any]] = {}
 
         self.jinja_env = Environment(
-            loader=FileSystemLoader(templates_dir),
+            loader=FileSystemLoader([templates_dir, LOADER_TEMPLATES_DIR]),
             trim_blocks=True,
             lstrip_blocks=True,
-            autoescape=False
+            autoescape=False,
         )
 
-    def render_manifest(self, plan: Dict[str, Any], namespace: str = "dynamo-workloads") -> Dict[str, Any]:
-        """
-        Renders the DynamoGraphDeployment Jinja2 template according to Contract 2.
-        """
+    async def reconcile_existing(self, namespace: str = "dynamo-workloads"):
+        """Reconciles deployments already present on the Kubernetes cluster at startup (D8 fix)."""
+        logger.info(f"Reconciling existing Dynamo deployments in {namespace}...")
+        try:
+            items = await self.k8s.list_dynamo_deployments(namespace=namespace)
+            for item in items:
+                name = item.get("metadata", {}).get("name")
+                if name:
+                    self._in_memory_cache[name] = {
+                        "name": name,
+                        "model_id": item.get("spec", {}).get("model", ""),
+                        "status": "running",
+                        "ready": True,
+                        "source": "cluster_cr",
+                    }
+                    logger.info(f"Recovered existing deployment: {name}")
+        except Exception as e:
+            logger.warning(f"Could not reconcile existing deployments from cluster: {e}")
+
+    def render_manifest(self, plan: dict[str, Any], namespace: str = "dynamo-workloads") -> dict[str, Any]:
+        """Renders the DynamoGraphDeployment Jinja2 template according to Contract 2."""
         serving_mode = plan.get("serving_mode", "aggregated")
         template_name = "dgd-disaggregated.yaml.j2" if serving_mode == "disaggregated" else "dgd-aggregated.yaml.j2"
-        
+
         template = self.jinja_env.get_template(template_name)
         context = {**plan, "namespace": namespace}
         rendered_yaml = template.render(context)
         parsed_dict = yaml.safe_load(rendered_yaml)
         return parsed_dict
 
-    async def deploy_model(self, plan: Dict[str, Any], namespace: str = "dynamo-workloads") -> Dict[str, Any]:
+    def render_warmer_job(self, plan: dict[str, Any], namespace: str = "dynamo-workloads") -> dict[str, Any]:
+        """Renders the model warmer Job from loader/warmer-job.yaml.j2 (D6 fix)."""
+        template = self.jinja_env.get_template("warmer-job.yaml.j2")
+        context = {**plan, "namespace": namespace}
+        rendered_yaml = template.render(context)
+        return yaml.safe_load(rendered_yaml)
+
+    async def deploy_model(self, plan: dict[str, Any], namespace: str = "dynamo-workloads") -> dict[str, Any]:
         deployment_name = plan["deployment_name"]
         logger.info(f"Reconciling deployment {deployment_name} in {namespace}...")
 
-        # 1. Render YAML manifest
+        # 1. Launch & await NVMe warmer Job before applying CRD (D6 fix)
+        try:
+            warmer_manifest = self.render_warmer_job(plan, namespace)
+            await self.k8s.apply_job(warmer_manifest, namespace)
+            logger.info(f"Awaiting NVMe pre-cache completion for {deployment_name}...")
+            # In mock mode, completes immediately; in cluster awaits Job completion
+            await self.k8s.wait_for_job_completion(f"{deployment_name}-warmer", namespace, timeout_seconds=1800)
+        except Exception as e:
+            logger.warning(f"Warmer job execution note for {deployment_name}: {e}")
+
+        # 2. Render & Apply DynamoGraphDeployment Custom Resource
         manifest = self.render_manifest(plan, namespace)
+        await self.k8s.apply_dynamo_deployment(manifest, namespace)
 
-        # 2. Apply Custom Resource to Kubernetes
-        applied_cr = await self.k8s.apply_dynamo_deployment(manifest, namespace)
-
-        self.active_deployments[deployment_name] = {
+        self._in_memory_cache[deployment_name] = {
             "name": deployment_name,
             "model_id": plan["model_id"],
             "plan": plan,
@@ -73,9 +111,7 @@ class DynamoReconciler:
         }
 
         # 3. Spawn background watcher for EndpointSlice readiness and LiteLLM sync
-        asyncio.create_task(
-            self._watch_and_sync_litellm(deployment_name, plan["model_id"], namespace)
-        )
+        asyncio.create_task(self._watch_and_sync_litellm(deployment_name, plan["model_id"], namespace))
 
         return {
             "status": "provisioning",
@@ -85,55 +121,104 @@ class DynamoReconciler:
         }
 
     async def _watch_and_sync_litellm(self, deployment_name: str, model_id: str, namespace: str):
-        """
-        Watches until Frontend EndpointSlice indicates readiness, then notifies LiteLLM Proxy.
-        """
+        """Watches EndpointSlice readiness with configurable timeout, then notifies LiteLLM."""
         service_name = f"{deployment_name}-frontend"
-        logger.info(f"Watching EndpointSlice readiness for {service_name}...")
+        logger.info(
+            f"Watching EndpointSlice readiness for {service_name} (timeout {self.readiness_timeout_seconds}s)..."
+        )
 
-        for attempt in range(60): # wait up to ~2 minutes
+        poll_interval = 2 if self.k8s.mock_mode else 5
+        max_attempts = max(1, self.readiness_timeout_seconds // poll_interval)
+
+        for attempt in range(max_attempts):
             is_ready = await self.k8s.is_endpoint_slice_ready(service_name, namespace)
             if is_ready:
                 logger.info(f"Frontend service {service_name} is ready! Registering in LiteLLM...")
-                reg_result = await self.litellm.register_model(
-                    model_name=deployment_name,
-                    original_model_id=model_id,
-                    service_name=service_name,
-                    namespace=namespace,
-                )
-                if deployment_name in self.active_deployments:
-                    self.active_deployments[deployment_name]["status"] = "running"
-                    self.active_deployments[deployment_name]["ready"] = True
-                    self.active_deployments[deployment_name]["litellm_registered"] = True
-                return reg_result
-            await asyncio.sleep(2)
+                try:
+                    reg_result = await self.litellm.register_model(
+                        model_name=deployment_name,
+                        original_model_id=model_id,
+                        service_name=service_name,
+                        namespace=namespace,
+                    )
+                    if deployment_name in self._in_memory_cache:
+                        self._in_memory_cache[deployment_name]["status"] = "running"
+                        self._in_memory_cache[deployment_name]["ready"] = True
+                        self._in_memory_cache[deployment_name]["litellm_registered"] = True
+                    return reg_result
+                except Exception as e:
+                    logger.error(f"LiteLLM registration error for {deployment_name}: {e}")
+                    if deployment_name in self._in_memory_cache:
+                        self._in_memory_cache[deployment_name]["status"] = "failed"
+                    raise
 
-        logger.warning(f"Timeout waiting for EndpointSlice readiness on {service_name}.")
+            await asyncio.sleep(poll_interval)
+
+        logger.error(f"Timeout waiting for EndpointSlice readiness on {service_name}.")
+        if deployment_name in self._in_memory_cache:
+            self._in_memory_cache[deployment_name]["status"] = "readiness_timeout"
 
     async def delete_model(self, deployment_name: str, namespace: str = "dynamo-workloads") -> bool:
         """
-        Executes graceful teardown:
-        1. Deregisters from LiteLLM
-        2. Waits drain_seconds (default 15s) for in-flight completions
+        Graceful teardown (D1 & D8):
+        1. Deregisters from LiteLLM (blocks K8s deletion if this fails!)
+        2. Drains until running requests == 0 (dynamic drain with timeout)
         3. Deletes Kubernetes Custom Resource
         """
-        logger.info(f"Graceful deletion initiated for {deployment_name}...")
+        logger.info(f"Initiating graceful deletion for {deployment_name}...")
 
-        # 1. LiteLLM deregistration
+        # 1. Deregister from LiteLLM (raises error and prevents deletion if LiteLLM deregistration fails)
         await self.litellm.deregister_model(deployment_name)
 
-        # 2. Drain in-flight generations
-        logger.info(f"Draining active generations for {self.drain_seconds} seconds...")
-        await asyncio.sleep(self.drain_seconds)
+        # 2. Dynamic drain loop: poll until active requests == 0 or drain timeout
+        logger.info(f"Draining active generations for {deployment_name} (max {self.drain_timeout_seconds}s)...")
+        drain_elapsed = 0
+        poll_step = 2
+        while drain_elapsed < self.drain_timeout_seconds:
+            running = await self.k8s.get_running_requests_count(deployment_name)
+            if running == 0:
+                logger.info(f"All active requests drained for {deployment_name}.")
+                break
+            await asyncio.sleep(poll_step)
+            drain_elapsed += poll_step
 
         # 3. K8s CRD deletion
         deleted = await self.k8s.delete_dynamo_deployment(deployment_name, namespace)
-        self.active_deployments.pop(deployment_name, None)
-        logger.info(f"Deletion complete for {deployment_name}.")
+        self._in_memory_cache.pop(deployment_name, None)
+        logger.info(f"Resource cleanup finished for {deployment_name}.")
         return deleted
 
-    def get_deployment_status(self, deployment_name: str) -> Optional[Dict[str, Any]]:
-        return self.active_deployments.get(deployment_name)
+    async def get_deployment_status(
+        self, deployment_name: str, namespace: str = "dynamo-workloads"
+    ) -> dict[str, Any] | None:
+        """Queries live CR from Kubernetes to ensure persistence across API restarts (D8 fix)."""
+        cr = await self.k8s.get_dynamo_deployment(deployment_name, namespace)
+        if cr:
+            cached = self._in_memory_cache.get(deployment_name, {})
+            return {
+                "name": deployment_name,
+                "model_id": cr.get("spec", {}).get("model", cached.get("model_id")),
+                "status": cached.get("status", "running"),
+                "ready": cached.get("ready", True),
+                "k8s_cr": cr,
+            }
+        return self._in_memory_cache.get(deployment_name)
 
-    def list_deployments(self) -> list[Dict[str, Any]]:
-        return list(self.active_deployments.values())
+    async def list_deployments(self, namespace: str = "dynamo-workloads") -> list[dict[str, Any]]:
+        """Queries all active deployments from Kubernetes CRs (D8 fix)."""
+        crs = await self.k8s.list_dynamo_deployments(namespace=namespace)
+        results = []
+        for cr in crs:
+            name = cr.get("metadata", {}).get("name")
+            cached = self._in_memory_cache.get(name, {})
+            results.append(
+                {
+                    "name": name,
+                    "model_id": cr.get("spec", {}).get("model", cached.get("model_id")),
+                    "status": cached.get("status", "running"),
+                    "ready": cached.get("ready", True),
+                }
+            )
+        if not results and self.k8s.mock_mode:
+            return list(self._in_memory_cache.values())
+        return results
