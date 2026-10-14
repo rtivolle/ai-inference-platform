@@ -9,9 +9,21 @@ fois, secrets propres à chaque cluster, validation et vérification des rollout
 La documentation complète (guides d'installation, architecture, API, opérations)
 se trouve dans [docs/](docs/README.md).
 
+Le workflow optionnel de collecte d'inférence, revue des exemples, datasets JSONL
+versionnés et fine-tuning LoRA est décrit dans
+[Data & Fine-Tuning](docs/data-and-fine-tuning.md). Il est désactivé par défaut et
+expose des API pour la collecte, l'entraînement et la promotion d'un modèle figé
+sur son commit Hugging Face.
+
 ---
 
 ## Console Web
+
+La console prend aussi en charge une connexion administrateur par mot de passe,
+les métriques Prometheus en direct, l'état des nœuds/pods Kubernetes, les logs,
+le changement de réplicas et le remplacement de pods. La configuration du compte,
+des sessions, de Prometheus et des permissions est décrite dans
+[control-plane/README.md](control-plane/README.md).
 
 Le Control Plane sert une console à la racine `/` : inventaire GPU, recherche et filtrage des
 déploiements, détails du plan, création de modèles et suppression avec confirmation. Les données

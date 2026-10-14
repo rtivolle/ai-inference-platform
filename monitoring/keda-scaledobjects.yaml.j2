@@ -41,7 +41,7 @@ spec:
         metricName: dynamo_ttft_p95_seconds
         threshold: "0.35"
         query: |
-          histogram_quantile(0.95, sum(rate(dynamo_frontend_time_to_first_token_seconds_bucket{dynamo_namespace="{{ namespace | default('dynamo-workloads') }}-{{ deployment_name }}"}[2m])) by (le))
+          histogram_quantile(0.95, sum(rate(dynamo_frontend_time_to_first_token_seconds_bucket{namespace="{{ namespace | default('dynamo-workloads') }}", app_kubernetes_io_name="{{ deployment_name }}"}[2m])) by (le))
     - type: prometheus
       metadata:
         serverAddress: http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090

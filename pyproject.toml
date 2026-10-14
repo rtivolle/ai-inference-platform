@@ -19,6 +19,7 @@ dependencies = [
     "huggingface_hub>=0.25.0",
     "jsonschema>=4.23.0",
     "argon2-cffi>=23.1.0",
+    "boto3>=1.35.0,<2",
 ]
 
 [project.optional-dependencies]

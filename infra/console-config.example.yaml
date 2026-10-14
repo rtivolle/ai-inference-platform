@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: inference-console-config
+  namespace: dynamo-control-plane
+data:
+  CONTROL_PLANE_PUBLIC_URL: "https://control.example.com"
+  CONTROL_PLANE_SESSION_SECONDS: "3600"
+  PROMETHEUS_URL: "http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090"
+  CONTROL_PLANE_GATEWAY_DRAIN_DELAY_SECONDS: "15"

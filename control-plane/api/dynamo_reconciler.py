@@ -40,6 +40,8 @@ class DynamoReconciler:
         self.drain_timeout_seconds = drain_timeout_seconds
         self.readiness_timeout_seconds = readiness_timeout_seconds
         self._in_memory_cache: dict[str, dict[str, Any]] = {}
+        self._background_tasks: set[asyncio.Task] = set()
+        self._reconcile_locks: dict[str, asyncio.Lock] = {}
 
         self.jinja_env = Environment(
             loader=FileSystemLoader([templates_dir, LOADER_TEMPLATES_DIR, MONITORING_TEMPLATES_DIR]),
@@ -116,49 +118,55 @@ class DynamoReconciler:
 
     async def deploy_model(self, plan: dict[str, Any], namespace: str = "dynamo-workloads") -> dict[str, Any]:
         deployment_name = plan["deployment_name"]
-        logger.info(f"Reconciling deployment {deployment_name} in {namespace}...")
+        lock = self._reconcile_locks.setdefault(deployment_name, asyncio.Lock())
+        async with lock:
+            if deployment_name in self._in_memory_cache and self._in_memory_cache[deployment_name].get("status") in ("provisioning", "running"):
+                raise RuntimeError(f"Deployment '{deployment_name}' is already being reconciled.")
+            logger.info(f"Reconciling deployment {deployment_name} in {namespace}...")
 
-        # Discover all eligible hosts, then pin one Job to each. Worker scheduling is
-        # restricted to this same set so every node-local cache is ready before startup.
-        target_nodes = await self.k8s.get_target_gpu_nodes(plan)
-        if not target_nodes:
-            raise RuntimeError("No eligible GPU nodes found for model cache warming.")
-        plan = {**plan, "target_node_names": target_nodes}
-        jobs = [self.render_warmer_job({**plan, "target_node": node}, namespace) for node in target_nodes]
-        for job in jobs:
-            await self.k8s.apply_job(job, namespace)
-        completed = await asyncio.gather(*(
-            self.k8s.wait_for_job_completion(job["metadata"]["name"], namespace, timeout_seconds=1800)
-            for job in jobs
-        ))
-        if not all(completed):
-            raise RuntimeError(f"Model cache warming failed for {deployment_name}.")
+            # Discover all eligible hosts, then pin one Job to each. Worker scheduling is
+            # restricted to this same set so every node-local cache is ready before startup.
+            target_nodes = await self.k8s.get_target_gpu_nodes(plan)
+            if not target_nodes:
+                raise RuntimeError("No eligible GPU nodes found for model cache warming.")
+            plan = {**plan, "target_node_names": target_nodes}
+            jobs = [self.render_warmer_job({**plan, "target_node": node}, namespace) for node in target_nodes]
+            for job in jobs:
+                await self.k8s.apply_job(job, namespace)
+            completed = await asyncio.gather(*(
+                self.k8s.wait_for_job_completion(job["metadata"]["name"], namespace, timeout_seconds=1800)
+                for job in jobs
+            ))
+            if not all(completed):
+                raise RuntimeError(f"Model cache warming failed for {deployment_name}.")
 
-        manifest = self.render_manifest(plan, namespace)
-        await self.k8s.apply_dynamo_deployment(manifest, namespace)
-        for scaled_object in self.render_scaled_objects(plan, namespace):
-            await self.k8s.apply_scaled_object(scaled_object, namespace)
+            manifest = self.render_manifest(plan, namespace)
+            await self.k8s.apply_dynamo_deployment(manifest, namespace)
+            for scaled_object in self.render_scaled_objects(plan, namespace):
+                await self.k8s.apply_scaled_object(scaled_object, namespace)
 
-        self._in_memory_cache[deployment_name] = {
-            "name": deployment_name,
-            "model_id": plan["model_id"],
-            "plan": plan,
-            "namespace": namespace,
-            "status": "provisioning",
-            "ready": False,
-        }
+            self._in_memory_cache[deployment_name] = {
+                "name": deployment_name,
+                "model_id": plan["model_id"],
+                "plan": plan,
+                "namespace": namespace,
+                "status": "provisioning",
+                "ready": False,
+            }
 
-        # 3. Spawn background watcher for EndpointSlice readiness and LiteLLM sync
-        asyncio.create_task(self._watch_and_sync_litellm(deployment_name, plan["model_id"], namespace))
+            # 3. Spawn background watcher for EndpointSlice readiness and LiteLLM sync
+            task = asyncio.create_task(self._watch_and_sync_litellm(deployment_name, plan["model_id"], namespace, plan.get("model_revision")))
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
 
-        return {
-            "status": "provisioning",
-            "deployment_name": deployment_name,
-            "manifest": manifest,
-            "plan": plan,
-        }
+            return {
+                "status": "provisioning",
+                "deployment_name": deployment_name,
+                "manifest": manifest,
+                "plan": plan,
+            }
 
-    async def _watch_and_sync_litellm(self, deployment_name: str, model_id: str, namespace: str):
+    async def _watch_and_sync_litellm(self, deployment_name: str, model_id: str, namespace: str, model_revision: str | None = None):
         """Watches EndpointSlice readiness with configurable timeout, then notifies LiteLLM."""
         service_name = f"{deployment_name}-frontend"
         logger.info(
@@ -171,6 +179,10 @@ class DynamoReconciler:
         for attempt in range(max_attempts):
             is_ready = await self.k8s.is_endpoint_slice_ready(service_name, namespace)
             if is_ready:
+                cached = self._in_memory_cache.get(deployment_name)
+                if cached and cached.get("status") in ("deleting", "deleted"):
+                    logger.info(f"Deployment {deployment_name} was deleted during readiness wait; skipping LiteLLM registration.")
+                    return None
                 logger.info(f"Frontend service {service_name} is ready! Registering in LiteLLM...")
                 try:
                     reg_result = await self.litellm.register_model(
@@ -178,6 +190,7 @@ class DynamoReconciler:
                         original_model_id=model_id,
                         service_name=service_name,
                         namespace=namespace,
+                        model_revision=model_revision,
                     )
                     if deployment_name in self._in_memory_cache:
                         self._in_memory_cache[deployment_name]["status"] = "running"
@@ -219,20 +232,25 @@ class DynamoReconciler:
         # 1. Deregister from LiteLLM (raises error and prevents deletion if LiteLLM deregistration fails)
         await self.litellm.deregister_model(deployment_name)
 
+        if not self.k8s.mock_mode:
+            # Let every gateway replica observe deregistration before destroying backends.
+            await asyncio.sleep(max(0, int(os.getenv("CONTROL_PLANE_GATEWAY_DRAIN_DELAY_SECONDS", "15"))))
+
         # 2. Dynamic drain loop: poll until active requests == 0 or drain timeout
         logger.info(f"Draining active generations for {deployment_name} (max {self.drain_timeout_seconds}s)...")
         drain_elapsed = 0
         poll_step = 2
-        while drain_elapsed < self.drain_timeout_seconds:
+        while True:
             running = await self.k8s.get_running_requests_count(deployment_name)
             if running == 0:
                 logger.info(f"All active requests drained for {deployment_name}.")
                 break
+            if drain_elapsed >= self.drain_timeout_seconds:
+                if not self.k8s.mock_mode:
+                    raise TimeoutError("Active requests did not drain before the deadline; the Kubernetes workload was retained.")
+                break
             await asyncio.sleep(poll_step)
             drain_elapsed += poll_step
-        else:
-            if not self.k8s.mock_mode:
-                raise TimeoutError("Active requests did not drain before the deadline; the Kubernetes workload was retained.")
 
         # Remove external autoscalers before deleting the operator-owned graph.
         # Deterministic names allow cleanup even after a control-plane restart.

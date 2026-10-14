@@ -8,6 +8,7 @@ Hugging Face model metadata inspector adhering to R2 specifications:
 - Never falls back silently: unknown models raise ModelNotFoundError.
 """
 
+import copy
 import json
 import logging
 
@@ -104,16 +105,16 @@ class HFInspector:
     def __init__(self, token: str | None = None):
         self.token = token
 
-    def inspect(self, model_id: str) -> ModelArchitectureSpecs:
+    def inspect(self, model_id: str, revision: str | None = None) -> ModelArchitectureSpecs:
         # Check verified models dictionary first
-        if model_id in VERIFIED_MODELS:
+        if model_id in VERIFIED_MODELS and not revision:
             logger.info(f"Using verified profile for {model_id}")
-            return VERIFIED_MODELS[model_id]
+            return copy.deepcopy(VERIFIED_MODELS[model_id])
 
         logger.info(f"Inspecting Hugging Face repository for {model_id}...")
         try:
             # 1. Fetch config.json
-            config_file = hf_hub_download(repo_id=model_id, filename="config.json", token=self.token)
+            config_file = hf_hub_download(repo_id=model_id, filename="config.json", token=self.token, revision=revision)
             with open(config_file, "r", encoding="utf-8") as f:
                 config = json.load(f)
 
@@ -121,7 +122,7 @@ class HFInspector:
             total_size_bytes = None
             try:
                 index_file = hf_hub_download(
-                    repo_id=model_id, filename="model.safetensors.index.json", token=self.token
+                    repo_id=model_id, filename="model.safetensors.index.json", token=self.token, revision=revision
                 )
                 with open(index_file, "r", encoding="utf-8") as f:
                     index_data = json.load(f)
@@ -160,7 +161,12 @@ class HFInspector:
         # Determine parameter count: prioritize total_size from safetensors index
         if total_size_bytes:
             # bytes divided by bytes_per_param (approximate based on dtype)
-            bytes_per_param = 2.0 if normalized_dtype in ("bf16", "fp16") else 1.0
+            if normalized_dtype == "fp32":
+                bytes_per_param = 4.0
+            elif normalized_dtype in ("bf16", "fp16"):
+                bytes_per_param = 2.0
+            else:
+                bytes_per_param = 1.0
             total_params = int(total_size_bytes / bytes_per_param)
         else:
             # Fallback estimation incorporating GQA and MoE

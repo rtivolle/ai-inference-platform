@@ -52,12 +52,13 @@ class LiteLLMSync:
         port: int = 8000,
         rpm: int = 1000,
         timeout: int = 600,
+        model_revision: str | None = None,
     ) -> dict[str, Any]:
         """
         Executes POST /model/new with exponential retry (3 attempts).
         """
         api_base = f"http://{service_name}.{namespace}.svc.cluster.local:{port}/v1"
-        payload = {
+        payload: dict[str, Any] = {
             "model_name": model_name,
             "litellm_params": {
                 "model": f"openai/{original_model_id}",
@@ -72,6 +73,8 @@ class LiteLLMSync:
                 "supports_function_calling": True,
             },
         }
+        if model_revision:
+            payload["model_info"]["revision"] = model_revision
 
         if self.mock_mode:
             self._mock_registry[model_name] = payload
@@ -124,6 +127,9 @@ class LiteLLMSync:
             try:
                 async with httpx.AsyncClient(timeout=10.0) as client:
                     resp = await client.post(url, json=payload, headers=headers)
+                    if resp.status_code == 404:
+                        logger.info(f"Model {model_name} was already absent from LiteLLM (404); continuing teardown.")
+                        return True
                     resp.raise_for_status()
                     logger.info(f"Successfully deregistered model {model_name} from LiteLLM on attempt {attempt}.")
                     return True

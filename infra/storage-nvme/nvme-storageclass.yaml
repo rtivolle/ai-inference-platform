@@ -17,7 +17,7 @@ spec:
   capacity:
     storage: 2Ti
   accessModes:
-    - ReadWriteMany
+    - ReadWriteOnce
   persistentVolumeReclaimPolicy: Retain
   storageClassName: local-nvme
   local:
@@ -36,7 +36,7 @@ metadata:
   namespace: dynamo-workloads
 spec:
   accessModes:
-    - ReadWriteMany
+    - ReadWriteOnce
   storageClassName: local-nvme
   resources:
     requests:

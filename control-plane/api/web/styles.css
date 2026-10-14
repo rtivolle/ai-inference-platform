@@ -341,7 +341,7 @@ main > .notice {
 .muted-notice {
   background: #f4f7f5;
   border: 1px solid var(--line);
-  color: #6a7b70;
+  color: var(--muted);
 }
 .page-heading {
   display: flex;
@@ -570,7 +570,7 @@ td {
   padding: 20px 23px;
   border-bottom: 1px solid #edf1ed;
   font-size: 11px;
-  color: #79887e;
+  color: var(--muted);
   vertical-align: middle;
 }
 tbody tr:last-child td {
@@ -629,7 +629,7 @@ tbody tr:hover {
 .text-button {
   background: none;
   border: none;
-  color: #688274;
+  color: #536d5e;
   font-size: 11px;
   padding: 7px;
   border-radius: 4px;
@@ -925,7 +925,7 @@ tbody tr:hover {
   margin: 23px 0;
 }
 .detail-grid dt {
-  color: #90a095;
+  color: var(--muted);
   font-size: 10px;
   margin-bottom: 7px;
 }

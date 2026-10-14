@@ -12,11 +12,11 @@ spec:
       rules:
         # Aggregated recording rules
         - record: vllm:num_requests_waiting
-          expr: sum by (model_name, namespace) (vllm_num_requests_waiting)
+          expr: sum by (model_name, namespace) (vllm:num_requests_waiting or vllm_num_requests_waiting)
         - record: vllm:gpu_cache_usage_perc
           expr: max by (model_name, namespace) (vllm_gpu_cache_usage_factor)
         - record: dcgm:gpu_utilization_avg
-          expr: avg by (gpu, model_name) (DCGM_FI_DEV_GPU_UTIL)
+          expr: avg by (gpu, pod, namespace) (DCGM_FI_DEV_GPU_UTIL)
 
         # Critical alerts
         - alert: DynamoKVCacheExhaustion

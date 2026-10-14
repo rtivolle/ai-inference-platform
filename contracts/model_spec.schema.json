@@ -12,6 +12,11 @@
           "type": "string",
           "description": "Hugging Face model identifier or S3 URI"
         },
+        "model_revision": {
+          "type": ["string", "null"],
+          "pattern": "^[a-f0-9]{40}$",
+          "description": "Optional immutable Hugging Face commit; pinned inspection, warming, and serving."
+        },
         "deployment_name": {
           "type": "string",
           "description": "RFC 1123 compliant DNS name for the deployment. Generated if omitted.",
@@ -60,8 +65,7 @@
           "examples": ["NVIDIA-H100-80GB", "NVIDIA-A100-80GB", "NVIDIA-L40S"]
         },
         "vram_gb": {
-          "type": "number",
-          "minimum": 8
+          "type": ["number", "null"]
         },
         "total_count": {
           "type": "integer",
@@ -133,6 +137,7 @@
       ],
       "properties": {
         "model_id": { "type": "string" },
+        "model_revision": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
         "deployment_name": {
           "type": "string",
           "pattern": "^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$"

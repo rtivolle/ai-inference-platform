@@ -130,14 +130,16 @@ class VRAMCalculator:
         # 1. Try single-node TP first (PP = 1)
         valid_tps = [1, 2, 4, 8]
         for tp in valid_tps:
-            if (tp * gpu_vram_bytes >= m_total_bytes) and (specs.num_key_value_heads % tp == 0):
+            if (tp * gpu_vram_bytes >= m_total_bytes) and (specs.num_key_value_heads % tp == 0) and (specs.num_attention_heads % tp == 0):
                 if tp <= available_gpus:
                     return tp, 1
 
         # 2. Try multi-node with Pipeline Parallelism (PP in {2, 4})
         for pp in [2, 4]:
-            for tp in [4, 8]:
-                if (tp * pp * gpu_vram_bytes >= m_total_bytes) and (specs.num_key_value_heads % tp == 0):
+            if specs.num_hidden_layers < pp:
+                continue
+            for tp in [1, 2, 4, 8]:
+                if (tp * pp * gpu_vram_bytes >= m_total_bytes) and (specs.num_key_value_heads % tp == 0) and (specs.num_attention_heads % tp == 0):
                     if (tp * pp) <= available_gpus:
                         return tp, pp
 
@@ -173,4 +175,4 @@ class VRAMCalculator:
             gpu_memory_utilization=gpu_memory_utilization,
         )
         capacity = reduced_tp * gpu_vram_gb * (1024**3)
-        return capacity >= m_total and (specs.num_key_value_heads % reduced_tp == 0)
+        return capacity >= m_total and (specs.num_key_value_heads % reduced_tp == 0) and (specs.num_attention_heads % reduced_tp == 0)

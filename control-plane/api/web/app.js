@@ -251,17 +251,17 @@ function renderModels() {
   $("empty-state").hidden = models.length > 0;
   const isFiltered = state.connected && state.models.length > 0;
   $("empty-title").textContent = !state.connected
-    ? "Connect to your control plane"
+    ? "Sign in to your workspace"
     : isFiltered
       ? "No matching deployments"
       : "Your next model starts here";
   $("empty-description").textContent = !state.connected
-    ? "Enter your API token to view models and GPU capacity."
+    ? "Use your administrator account to view models and GPU capacity."
     : isFiltered
       ? "Try a different model name or clear the status filter."
       : "Deploy a Hugging Face model. The auto-tuner will find a configuration for your GPUs.";
   $("empty-action").textContent = !state.connected
-    ? "Connect to platform"
+    ? "Sign in"
     : isFiltered
       ? "Clear filters"
       : "Deploy your first model";
@@ -284,7 +284,7 @@ function renderWorkspace() {
   $("stat-total").textContent = `/ ${total}`;
   $("stat-nodes").textContent = state.inventory.nodes_count;
   $("stat-network").textContent = state.inventory.rdma_network_active
-    ? "RDMA network active"
+    ? "RDMA resources available"
     : "RDMA network inactive";
   $("gpu-empty").hidden = pools.length > 0;
   $("gpu-empty").querySelector("p").textContent =
@@ -298,7 +298,7 @@ function renderWorkspace() {
               Math.min(100, (pool.available_count / pool.total_count) * 100),
             )
           : 0;
-      return `<article class="gpu-card"><div class="gpu-card-heading"><div><h3>${escapeHtml(pool.gpu_sku)}</h3><p>${escapeHtml(pool.vram_gb)} GB VRAM per GPU</p></div><span class="badge ${pool.rdma_supported ? "ready" : "muted"}">${pool.rdma_supported ? "RDMA supported" : "No RDMA"}</span></div><div class="gpu-capacity"><strong>${escapeHtml(pool.available_count)}</strong> / ${escapeHtml(pool.total_count)} GPUs available</div><div class="capacity-bar" role="meter" aria-label="Available GPUs in ${escapeHtml(pool.gpu_sku)}" aria-valuemin="0" aria-valuemax="${escapeHtml(Math.max(1, pool.total_count))}" aria-valuenow="${escapeHtml(pool.available_count)}"><span style="width:${percent}%"></span></div><div class="gpu-legend"><span><span class="status-dot green"></span>${escapeHtml(pool.available_count)} available</span><span><span class="status-dot"></span>${escapeHtml(pool.total_count - pool.available_count)} allocated</span></div></article>`;
+      return `<article class="gpu-card"><div class="gpu-card-heading"><div><h3>${escapeHtml(pool.gpu_sku)}</h3><p>${pool.vram_gb === null ? "VRAM metadata unavailable" : `${escapeHtml(pool.vram_gb)} GB VRAM per GPU`}</p></div><span class="badge ${pool.rdma_supported ? "ready" : "muted"}">${pool.rdma_supported ? "RDMA supported" : "No RDMA"}</span></div><div class="gpu-capacity"><strong>${escapeHtml(pool.available_count)}</strong> / ${escapeHtml(pool.total_count)} GPUs available</div><div class="capacity-bar" role="meter" aria-label="Available GPUs in ${escapeHtml(pool.gpu_sku)}" aria-valuemin="0" aria-valuemax="${escapeHtml(Math.max(1, pool.total_count))}" aria-valuenow="${escapeHtml(pool.available_count)}"><span style="width:${percent}%"></span></div><div class="gpu-legend"><span><span class="status-dot green"></span>${escapeHtml(pool.available_count)} available</span><span><span class="status-dot"></span>${escapeHtml(pool.total_count - pool.available_count)} allocated</span></div></article>`;
     })
     .join("");
   renderModels();
@@ -1004,6 +1004,15 @@ $("pod-rows").addEventListener("click", (event) => {
   } else {
     logsTarget = { deployment, ...pod };
     $("logs-title").textContent = pod.name;
+    if (!pod.containers || pod.containers.length === 0) {
+      $("logs-container").innerHTML = "<option disabled selected>No containers available</option>";
+      $("logs-container").disabled = true;
+      $("logs-content").textContent = "Pod contains no inspectable containers.";
+      $("logs-refresh").disabled = true;
+      $("logs-dialog").showModal();
+      return;
+    }
+    $("logs-container").disabled = false;
     $("logs-container").innerHTML = pod.containers
       .map((name) => `<option>${escapeHtml(name)}</option>`)
       .join("");
@@ -1030,7 +1039,7 @@ $("replacement-form").addEventListener("submit", async (event) => {
   }
 });
 async function loadLogs() {
-  if (!logsTarget) return;
+  if (!logsTarget || $("logs-container").disabled || !$("logs-container").value) return;
   const session = state.session;
   $("logs-content").textContent = "Loading container logs…";
   $("logs-refresh").disabled = true;

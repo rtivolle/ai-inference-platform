@@ -1,4 +1,5 @@
 .git
+.inference
 .venv
 venv
 __pycache__

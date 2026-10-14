@@ -17,6 +17,7 @@ Central index for all guides. Start with [Quickstart](quickstart.md), then read
 | [Infrastructure & Bootstrap](infrastructure.md) | `bootstrap_inference_cluster.sh`, GPU/RDMA/NVMe, Ingress + Cloudflare |
 | [Multi-Cluster Releases](multi-cluster.md) | Immutable digests, inventory, `deploy_clusters.py`, rollback |
 | [Operations & Autoscaling](operations.md) | KEDA ScaledObjects, Prometheus rules, drains, upgrades |
+| [Data & Fine-Tuning](data-and-fine-tuning.md) | Opt-in capture, review, versioned datasets, LoRA Jobs, evaluation, pinned promotion |
 | [Security](security.md) | Bearer/session auth, Secrets, RBAC, Cloudflare Access |
 | [Configuration Reference](configuration.md) | All environment variables and defaults |
 | [Troubleshooting](troubleshooting.md) | Symptom → cause → fix for common failures |

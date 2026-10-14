@@ -13,6 +13,7 @@ import yaml
 from api.dynamo_reconciler import DynamoReconciler
 from api.k8s_client import K8sClient
 from api.litellm_sync import LiteLLMSync
+from api.training import render_training_job
 
 ROOT = Path(__file__).resolve().parents[1]
 CRD_URLS = [
@@ -84,6 +85,9 @@ def rendered_manifests() -> list[dict[str, Any]]:
             manifests.append(reconciler.render_manifest(plan))
             manifests.append(reconciler.render_warmer_job(plan))
             manifests.extend(reconciler.render_scaled_objects(plan))
+    manifests.append(render_training_job({"id": "00000000-0000-0000-0000-000000000000", "job_name": "ft-validation", "image": "example/trainer@sha256:" + "a" * 64,
+                                          "request": {}, "dataset": {"id": "validation", "files": {}, "manifest_sha256": "a" * 64}},
+                                         "validation-bucket", None, "NVIDIA-H100-80GB"))
     return manifests
 
 

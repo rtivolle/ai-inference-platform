@@ -79,8 +79,11 @@ class UsageMetrics:
     @staticmethod
     def sample(point: list) -> list[float | None]:
         stamp, raw_value = point
+        timestamp = float(stamp)
+        if not math.isfinite(timestamp):
+            raise ValueError("Invalid monitoring timestamp.")
         value = float(raw_value)
-        return [float(stamp), value if math.isfinite(value) else None]
+        return [timestamp, value if math.isfinite(value) and value >= 0 else None]
 
     async def snapshot(self, window_minutes: int = 15) -> dict[str, Any]:
         if window_minutes not in (5, 15, 60):
@@ -142,6 +145,8 @@ class UsageMetrics:
             async with httpx.AsyncClient(timeout=5, headers=headers, transport=self.transport) as http:
                 payload = await self.query(http, expression)
             samples = payload["data"]["result"]
+            if payload.get("warnings"):
+                raise MetricsUnavailableError("Monitoring returned a partial result; active requests cannot be verified.")
             if not samples:
                 raise MetricsUnavailableError("No running-request metrics are available for this model.")
             _, value = self.sample(samples[0]["value"])

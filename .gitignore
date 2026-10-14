@@ -1,4 +1,5 @@
 # Python & Virtual Environments
+.inference/
 .venv/
 venv/
 ENV/

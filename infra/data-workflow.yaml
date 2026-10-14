@@ -1,0 +1,59 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: inference-data
+  namespace: dynamo-control-plane
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: inference-training
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: training-worker
+  namespace: inference-training
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: training-controller
+  namespace: inference-training
+rules:
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [create, get, delete]
+  - apiGroups: ['']
+    resources: [pods, pods/log]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: training-controller
+  namespace: inference-training
+subjects:
+  - kind: ServiceAccount
+    name: control-plane
+    namespace: dynamo-control-plane
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: training-controller
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: training-capacity
+  namespace: inference-training
+spec:
+  hard:
+    requests.nvidia.com/gpu: '1'
+    count/jobs.batch: '10'

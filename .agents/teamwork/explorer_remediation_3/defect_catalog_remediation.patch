@@ -1,0 +1,257 @@
+--- a/.agents/teamwork/worker_audit_1/DEFECT_CATALOG_AND_REMEDIATION.md
++++ b/.agents/teamwork/worker_audit_1/DEFECT_CATALOG_AND_REMEDIATION.md
+@@ -288,7 +288,7 @@
+ 
+       async def worker(idx):
+           for _ in range(50):
+-              token, _ = store.create(f"user-{idx}", lifetime=3600)
++              token, _ = store.create(f"user-{idx}", lifetime=3600, credential_version="v1")
+               store.get(token)
+               store.revoke(token)
+               await asyncio.sleep(0.001)
+@@ -299,101 +299,106 @@
+ - **Remediation Specification**:
+   Equip `SessionStore` with a mutual exclusion lock (`threading.RLock`) safeguarding all `execute` and `commit` operations, and enable WAL mode (`PRAGMA journal_mode=WAL`) and a busy timeout (`PRAGMA busy_timeout=5000`).
+ - **Unified Diff**:
+-  ```diff
+-  --- a/control-plane/api/auth.py
+-  +++ b/control-plane/api/auth.py
+-  @@ -6,6 +6,7 @@ import secrets
+-   import sqlite3
+-   import time
+-  +import threading
+-   from typing import Annotated
+-   from urllib.parse import urlsplit
+-  @@ -30,10 +31,14 @@ COOKIE_NAME = "inference_session"
+-   
+-   class SessionStore:
+-       def __init__(self, path: str = ":memory:"):
+-  +        self.lock = threading.RLock()
+-           self.db = sqlite3.connect(path, check_same_thread=False)
+-  -        self.db.execute("CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, username TEXT, csrf TEXT, expires REAL)")
+-  -        self.db.execute("CREATE TABLE IF NOT EXISTS attempts (key TEXT PRIMARY KEY, failures INTEGER, started REAL)")
+-  -        self.db.commit()
+-  +        with self.lock:
+-  +            self.db.execute("PRAGMA journal_mode=WAL")
+-  +            self.db.execute("PRAGMA busy_timeout=5000")
+-  +            self.db.execute("CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, username TEXT, csrf TEXT, expires REAL)")
+-  +            self.db.execute("CREATE TABLE IF NOT EXISTS attempts (key TEXT PRIMARY KEY, failures INTEGER, started REAL)")
+-  +            self.db.commit()
+-   
+-       @staticmethod
+-       def key(token: str) -> str:
+-  @@ -41,40 +46,46 @@ class SessionStore:
+-   
+-       def create(self, username: str, lifetime: int) -> tuple[str, dict]:
+-  -        self.db.execute("DELETE FROM sessions WHERE expires <= ?", (time.time(),))
+-  -        token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+-  -        expires = time.time() + lifetime
+-  -        self.db.execute("INSERT INTO sessions VALUES (?, ?, ?, ?)", (self.key(token), username, csrf, expires))
+-  -        self.db.commit()
+-  -        return token, {"username": username, "role": "admin", "csrf_token": csrf, "expires_at": expires}
+-  +        with self.lock:
+-  +            self.db.execute("DELETE FROM sessions WHERE expires <= ?", (time.time(),))
+-  +            token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+-  +            expires = time.time() + lifetime
+-  +            self.db.execute("INSERT INTO sessions VALUES (?, ?, ?, ?)", (self.key(token), username, csrf, expires))
+-  +            self.db.commit()
+-  +            return token, {"username": username, "role": "admin", "csrf_token": csrf, "expires_at": expires}
+-   
+-       def get(self, token: str) -> dict | None:
+-           if len(token) > 256:
+-               return None
+-  -        row = self.db.execute("SELECT username, csrf, expires FROM sessions WHERE id = ?", (self.key(token),)).fetchone()
+-  -        if not row or row[2] <= time.time():
+-  -            return None
+-  -        return {"username": row[0], "role": "admin", "csrf_token": row[1], "expires_at": row[2]}
+-  +        with self.lock:
+-  +            row = self.db.execute("SELECT username, csrf, expires FROM sessions WHERE id = ?", (self.key(token),)).fetchone()
+-  +            if not row or row[2] <= time.time():
+-  +                return None
+-  +            return {"username": row[0], "role": "admin", "csrf_token": row[1], "expires_at": row[2]}
+-   
+-       def revoke(self, token: str):
+-  -        self.db.execute("DELETE FROM sessions WHERE id = ?", (self.key(token),))
+-  -        self.db.commit()
+-  +        with self.lock:
+-  +            self.db.execute("DELETE FROM sessions WHERE id = ?", (self.key(token),))
+-  +            self.db.commit()
+-   
+-       def check_rate_limit(self, key: str):
+-  -        self.db.execute("DELETE FROM attempts WHERE started <= ?", (time.time() - 300,))
+-  -        row = self.db.execute("SELECT failures FROM attempts WHERE key = ?", (key,)).fetchone()
+-  -        if row and row[0] >= 5:
+-  -            raise HTTPException(429, "Too many login attempts. Try again in five minutes.", headers={"Retry-After": "300"})
+-  +        with self.lock:
+-  +            self.db.execute("DELETE FROM attempts WHERE started <= ?", (time.time() - 300,))
+-  +            row = self.db.execute("SELECT failures FROM attempts WHERE key = ?", (key,)).fetchone()
+-  +            if row and row[0] >= 5:
+-  +                raise HTTPException(429, "Too many login attempts. Try again in five minutes.", headers={"Retry-After": "300"})
+-   
+-       def failed_login(self, key: str):
+-  -        self.db.execute(
+-  -            "INSERT INTO attempts VALUES (?, 1, ?) ON CONFLICT(key) DO UPDATE SET failures = failures + 1",
+-  -            (key, time.time()),
+-  -        )
+-  -        self.db.commit()
+-  +        with self.lock:
+-  +            self.db.execute(
+-  +                "INSERT INTO attempts VALUES (?, 1, ?) ON CONFLICT(key) DO UPDATE SET failures = failures + 1",
+-  +                (key, time.time()),
+-  +            )
+-  +            self.db.commit()
+-   
+-       def reset_attempts(self, key: str):
+-  -        self.db.execute("DELETE FROM attempts WHERE key = ?", (key,))
+-  -        self.db.commit()
+-  +        with self.lock:
+-  +            self.db.execute("DELETE FROM attempts WHERE key = ?", (key,))
+-  +            self.db.commit()
+-  ```
++```diff
++--- a/control-plane/api/auth.py
+++++ b/control-plane/api/auth.py
++@@ -6,6 +6,7 @@ import secrets
++ import sqlite3
++ import time
+++import threading
++ from typing import Annotated
++ from urllib.parse import urlsplit
++@@ -32,15 +33,22 @@ COOKIE_NAME = "inference_session"
++ class SessionStore:
++     def __init__(self, db_path: str = ":memory:"):
+++        self.lock = threading.RLock()
++         self.db = sqlite3.connect(db_path, check_same_thread=False)
++-        self.db.execute("CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, username TEXT, csrf TEXT, expires REAL)")
++-        columns = [row[1] for row in self.db.execute("PRAGMA table_info(sessions)").fetchall()]
++-        if "credential_version" not in columns:
++-            self.db.execute("ALTER TABLE sessions ADD COLUMN credential_version TEXT NOT NULL DEFAULT ")
++-        self.db.execute("CREATE TABLE IF NOT EXISTS attempts (key TEXT PRIMARY KEY, failures INTEGER, started REAL)")
++-        self.db.commit()
+++        with self.lock:
+++            self.db.execute("PRAGMA journal_mode=WAL")
+++            self.db.execute("PRAGMA busy_timeout=5000")
+++            self.db.execute("CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, username TEXT, csrf TEXT, expires REAL)")
+++            columns = [row[1] for row in self.db.execute("PRAGMA table_info(sessions)").fetchall()]
+++            if "credential_version" not in columns:
+++                self.db.execute("ALTER TABLE sessions ADD COLUMN credential_version TEXT NOT NULL DEFAULT ")
+++            self.db.execute("CREATE TABLE IF NOT EXISTS attempts (key TEXT PRIMARY KEY, failures INTEGER, started REAL)")
+++            self.db.commit()
++ 
++     @staticmethod
++     def key(token: str) -> str:
++@@ -48,39 +56,46 @@ class SessionStore:
++-    def create(self, username: str, lifetime: int, credential_version: str) -> tuple[str, dict]:
++-        self.db.execute("DELETE FROM sessions WHERE expires <= ?", (time.time(),))
++-        token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
++-        expires = time.time() + lifetime
++-        self.db.execute("INSERT INTO sessions VALUES (?, ?, ?, ?, ?)", (self.key(token), username, csrf, expires, credential_version))
++-        self.db.commit()
++-        return token, {"username": username, "role": "admin", "csrf_token": csrf, "expires_at": expires}
+++    def create(self, username: str, lifetime: int, credential_version: str) -> tuple[str, dict]:
+++        with self.lock:
+++            self.db.execute("DELETE FROM sessions WHERE expires <= ?", (time.time(),))
+++            token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+++            expires = time.time() + lifetime
+++            self.db.execute("INSERT INTO sessions VALUES (?, ?, ?, ?, ?)", (self.key(token), username, csrf, expires, credential_version))
+++            self.db.commit()
+++            return token, {"username": username, "role": "admin", "csrf_token": csrf, "expires_at": expires}
++ 
++     def get(self, token: str) -> dict | None:
++         if len(token) > 256:
++             return None
++-        row = self.db.execute("SELECT username, csrf, expires, credential_version FROM sessions WHERE id = ?", (self.key(token),)).fetchone()
++-        if not row or row[2] <= time.time():
++-            return None
++-        return {"username": row[0], "role": "admin", "csrf_token": row[1], "expires_at": row[2], "credential_version": row[3]}
+++        with self.lock:
+++            row = self.db.execute("SELECT username, csrf, expires, credential_version FROM sessions WHERE id = ?", (self.key(token),)).fetchone()
+++            if not row or row[2] <= time.time():
+++                return None
+++            return {"username": row[0], "role": "admin", "csrf_token": row[1], "expires_at": row[2], "credential_version": row[3]}
++ 
++     def revoke(self, token: str):
++-        self.db.execute("DELETE FROM sessions WHERE id = ?", (self.key(token),))
++-        self.db.commit()
+++        with self.lock:
+++            self.db.execute("DELETE FROM sessions WHERE id = ?", (self.key(token),))
+++            self.db.commit()
++ 
++     def check_rate_limit(self, key: str):
++-        self.db.execute("DELETE FROM attempts WHERE started <= ?", (time.time() - 300,))
++-        row = self.db.execute("SELECT failures FROM attempts WHERE key = ?", (key,)).fetchone()
++-        if row and row[0] >= 5:
++-            raise HTTPException(429, "Too many login attempts. Try again in five minutes.", headers={"Retry-After": "300"})
+++        with self.lock:
+++            self.db.execute("DELETE FROM attempts WHERE started <= ?", (time.time() - 300,))
+++            row = self.db.execute("SELECT failures FROM attempts WHERE key = ?", (key,)).fetchone()
+++            if row and row[0] >= 5:
+++                raise HTTPException(429, "Too many login attempts. Try again in five minutes.", headers={"Retry-After": "300"})
++ 
++     def failed_login(self, key: str):
++-        self.db.execute(
++-            "INSERT INTO attempts VALUES (?, 1, ?) ON CONFLICT(key) DO UPDATE SET failures = failures + 1",
++-            (key, time.time()),
++-        )
++-        self.db.commit()
+++        with self.lock:
+++            self.db.execute(
+++                "INSERT INTO attempts VALUES (?, 1, ?) ON CONFLICT(key) DO UPDATE SET failures = failures + 1",
+++                (key, time.time()),
+++            )
+++            self.db.commit()
++ 
++     def reset_attempts(self, key: str):
++-        self.db.execute("DELETE FROM attempts WHERE key = ?", (key,))
++-        self.db.commit()
+++        with self.lock:
+++            self.db.execute("DELETE FROM attempts WHERE key = ?", (key,))
+++            self.db.commit()
++```
+ 
+ ---
+ 
+@@ -1402,9 +1407,9 @@
+ 
+ #### DEF-CONTRACT-02: Deployment Status Endpoint Authentication Inconsistency With OpenAPI Spec
+ - **Identifier**: `DEF-CONTRACT-02`
+-- **Severity**: **High**
++- **Severity**: **High** (Verified Remediated / Regression-Guarded)
+ - **Problem Type**: Security / Contract Integrity
+-- **Affected File & Lines**: `control-plane/api/main.py:255` vs `contracts/control_plane_openapi.yaml:149–155`
++- **Affected File & Lines**: `control-plane/api/main.py:265` vs `contracts/control_plane_openapi.yaml:149–155`
+ - **Root Cause & Mechanism of Failure**:
+   In `contracts/control_plane_openapi.yaml`, `GET /api/v1/models/{model_name}/status` declares security requirements:
+   ```yaml
+@@ -1412,16 +1417,16 @@
+     - BearerAuth: []
+     - CloudflareAccess: []
+   ```
+-  In earlier implementations of `main.py`, the endpoint `@app.get("/api/v1/models/{model_name}/status")` omitted the `dependencies=[Depends(verify_auth)]` dependency present on all other `/api/v1/*` routes. Unauthenticated clients could query model deployment parameters, internal namespaces, and model IDs.
+-- **Detailed Impact**:
+-  Security policy violation and contract divergence between specification and runtime implementation.
+-- **Remediation Specification**:
+-  Ensure `@app.get("/api/v1/models/{model_name}/status", ..., dependencies=[Depends(verify_auth)])` is consistently enforced.
+-- **Unified Diff**:
++  In earlier iterations, the endpoint `@app.get("/api/v1/models/{model_name}/status")` omitted the `dependencies=[Depends(verify_auth)]` dependency present on all other `/api/v1/*` routes. Unauthenticated clients could query model deployment parameters, internal namespaces, and model IDs.
++- **Current Status in Codebase**:
++  **Remediated in Base Code**: The dependency `dependencies=[Depends(verify_auth)]` is already present and active at `control-plane/api/main.py:265`. Unauthenticated requests return HTTP 401 Unauthorized.
++- **Regression Verification**:
++  Verified via test `test_poc_d_02_status_endpoint_auth_enforcement` in `tests/test_audit_defects_poc.py`, which ensures unauthenticated requests continue to be rejected with HTTP 401 Unauthorized.
++- **Reference Diff (Already Merged)**:
+   ```diff
+   --- a/control-plane/api/main.py
+   +++ b/control-plane/api/main.py
+-  @@ -252,7 +252,7 @@ async def list_models():
++  @@ -262,7 +262,7 @@ async def list_models():
+        return await reconciler.list_deployments()
+    
+    
+@@ -1433,7 +1438,6 @@
+   ```
+ 
+ ---
+-
+ #### DEF-CONTRACT-03: OpenAPI Specification Missing 11 Active API Routes, Operational Controls, and Session Schemas
+ - **Identifier**: `DEF-CONTRACT-03`
+ - **Severity**: **Medium**

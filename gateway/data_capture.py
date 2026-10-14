@@ -9,7 +9,7 @@ import json
 import logging
 import os
 import re
-from datetime import UTC, datetime
+from datetime import UTC
 
 import httpx
 from litellm.integrations.custom_logger import CustomLogger

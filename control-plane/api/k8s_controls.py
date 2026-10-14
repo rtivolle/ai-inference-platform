@@ -96,6 +96,8 @@ class KubernetesControls:
         pod = next((pod for pod in pods if pod["name"] == pod_name), None)
         if not pod:
             raise ControlError(404, "Pod does not belong to this deployment.")
+        if not pod.get("containers"):
+            raise ControlError(404, "Pod contains no inspectable containers.")
         selected = container or pod["containers"][0]
         if selected not in pod["containers"]:
             raise ControlError(404, "Container was not found in this pod.")
@@ -140,7 +142,7 @@ class KubernetesControls:
         specs = component_specs(resource)
         if self.k8s.mock_mode:
             adapters = [{"metadata": {"name": f"{name}-{component.lower()}"}, "spec": {"dgdRef": {"name": name, "serviceName": component}, "replicas": config.get("replicas", 1)}, "status": {"replicas": config.get("replicas", 1)}} for component, config in specs.items()]
-            autoscaled: set[str] = set()
+            autoscaled: set[str] = {item.get("spec", {}).get("scaleTargetRef", {}).get("name", "") for item in self.k8s._mock_scaled_objects.values()}
         else:
             async with client.ApiClient() as api:
                 adapters = await self._adapters(api)
@@ -202,7 +204,9 @@ class KubernetesControls:
                 raise ControlError(409, "Replica settings changed. Refresh before scaling.")
             extra_gpus = max(0, replicas - target["desired_replicas"]) * target["gpu_per_replica"]
             inventory = await self.k8s.get_cluster_gpu_inventory()
-            if extra_gpus > sum(pool["available_count"] for pool in inventory["gpu_pools"]):
+            sku = target.get("gpu_sku")
+            matching_pools = [p for p in inventory["gpu_pools"] if not sku or p.get("gpu_sku") == sku]
+            if extra_gpus > sum(pool["available_count"] for pool in matching_pools):
                 raise ControlError(409, "There is not enough unallocated GPU capacity for these replicas.")
             if self.k8s.mock_mode:
                 resource = await self.managed_deployment(name)

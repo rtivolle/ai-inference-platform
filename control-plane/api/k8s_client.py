@@ -64,7 +64,7 @@ class K8sClient:
             if self.in_cluster:
                 config.load_incluster_config()
             else:
-                await config.load_kube_config()
+                await config.load_kube_config(config_file=os.getenv("KUBECONFIG"), context=os.getenv("CONTROL_PLANE_KUBE_CONTEXT"))
             self._initialized = True
             logger.info("Kubernetes async client initialized successfully with live cluster.")
         except Exception as e:
@@ -278,8 +278,19 @@ class K8sClient:
             batch_api = client.BatchV1Api(api)
             poll_interval = 5
             elapsed = 0
+            consecutive_errors = 0
             while elapsed < timeout_seconds:
-                job = await batch_api.read_namespaced_job_status(name=job_name, namespace=namespace)
+                try:
+                    job = await batch_api.read_namespaced_job_status(name=job_name, namespace=namespace)
+                    consecutive_errors = 0
+                except (ApiException, Exception) as exc:
+                    consecutive_errors += 1
+                    if consecutive_errors > 5:
+                        raise
+                    logger.warning(f"Transient error polling job {job_name} ({consecutive_errors}/5): {exc}")
+                    await asyncio.sleep(poll_interval)
+                    elapsed += poll_interval
+                    continue
                 conditions = job.status.conditions or []
                 if any(condition.type == "Failed" and condition.status == "True" for condition in conditions):
                     raise RuntimeError(f"Warmer Job {job_name} failed.")

@@ -20,10 +20,18 @@ spec:
       labels:
         app.kubernetes.io/name: control-plane
     spec:
+      serviceAccountName: control-plane
       containers:
         - name: control-plane
           image: ai-inference-control-plane:latest
           imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: inference-console-config
+                optional: true
+            - secretRef:
+                name: inference-console-auth
+                optional: true
           env:
             - name: LITELLM_PROXY_URL
               value: "http://litellm-service.ai-gateway.svc.cluster.local:4000"

@@ -7,7 +7,10 @@ Adheres to R1, R2, R3 specifications:
 - Model not found mapped to HTTP 404 (D9).
 """
 
+import json
 import logging
+import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -15,6 +18,7 @@ from autotuner.hf_inspector import ModelNotFoundError
 from autotuner.sla_planner import ClusterInventory, DeployRequest, SLAPlanner
 from autotuner.vram_calculator import InsufficientCapacityError
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, status
+from fastapi.openapi.utils import get_openapi
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from kubernetes_asyncio.client.rest import ApiException
@@ -30,6 +34,7 @@ from api.k8s_client import K8sClient
 from api.k8s_controls import ControlError, KubernetesControls
 from api.litellm_sync import LiteLLMSync
 from api.metrics import UsageMetrics
+from api.training_routes import router as training_router
 
 # Shared clients
 k8s_client = K8sClient()
@@ -64,7 +69,67 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.include_router(auth_router)
+
+
+@app.middleware("http")
+async def response_security_headers(request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith(("/auth/", "/api/v1/")):
+        response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
+def service_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    schema = get_openapi(title=app.title, version=app.version, description=app.description, routes=app.routes)
+    schema["components"]["securitySchemes"]["AdministratorSession"] = {
+        "type": "apiKey", "in": "cookie", "name": "inference_session",
+        "description": "Administrator session from /auth/login. Mutations also require X-CSRF-Token from the login/session response.",
+    }
+    schema["components"]["securitySchemes"]["CaptureToken"] = {
+        "type": "http", "scheme": "bearer", "description": "Dedicated DATA_CAPTURE_TOKEN; grants capture-only access.",
+    }
+    for path, operations in schema["paths"].items():
+        if path.startswith("/api/v1/") or path == "/auth/logout":
+            for operation in operations.values():
+                operation["security"] = [{"BearerAuth": []}, {"AdministratorSession": []}]
+        elif path == "/auth/session":
+            operations["get"]["security"] = [{"AdministratorSession": []}]
+    schema["paths"]["/api/v1/data/events"]["post"]["security"] = [{"CaptureToken": []}]
+    app.openapi_schema = schema
+    return schema
+
+
+app.openapi = service_openapi  # type: ignore[method-assign]
 app.include_router(data_router)
+app.include_router(training_router)
+
+
+@app.middleware("http")
+async def data_boundaries(request, call_next):
+    started = time.monotonic()
+    request_id = str(uuid.uuid4())
+    if request.url.path in ("/api/v1/data/events", "/api/v1/data/examples") and request.method == "POST":
+        # Bound capture bodies even when transfer encoding supplies no Content-Length.
+        chunks = []
+        size = 0
+        async for chunk in request.stream():
+            size += len(chunk)
+            if size > 131072:
+                return JSONResponse(status_code=413, content={"detail": "Capture event exceeds 128 KiB"}, headers={"Cache-Control": "no-store"})
+            chunks.append(chunk)
+        request._body = b"".join(chunks)
+    response = await call_next(request)
+    if request.url.path.startswith(("/api/v1/data", "/api/v1/training")):
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Request-ID"] = request_id
+        route = getattr(request.scope.get("route"), "path", "unmatched")
+        # Route templates exclude resource IDs, query strings, bodies, and tokens.
+        logging.getLogger("uvicorn.error.workflow").info(json.dumps({"event": "workflow_request", "request_id": request_id,
+            "method": request.method, "route": route, "status": response.status_code, "duration_ms": round((time.monotonic() - started) * 1000, 2)}))
+    return response
 
 
 @app.exception_handler(DataError)
@@ -188,7 +253,7 @@ async def delete_model(model_name: str, background_tasks: BackgroundTasks):
     return {
         "status": "deleting",
         "model_name": model_name,
-        "message": f"Model {model_name} deregistered from gateway; draining active requests before K8s cleanup.",
+        "message": f"Deletion requested for {model_name}; gateway deregistration and request draining run in the background.",
     }
 
 

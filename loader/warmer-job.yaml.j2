@@ -32,6 +32,10 @@ spec:
           args:
             - "--model-id"
             - {{ model_id | tojson }}
+{% if model_revision %}
+            - "--revision"
+            - {{ model_revision | tojson }}
+{% endif %}
             - "--cache-dir"
             - "/mnt/nvme/model-cache"
           env:

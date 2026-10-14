@@ -16,7 +16,7 @@ class Message(StrictModel):
 
 
 class CaptureEvent(StrictModel):
-    request_id: str = Field(min_length=1, max_length=128)
+    request_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
     conversation_id: str = Field(min_length=1, max_length=128)
     model: str = Field(min_length=1, max_length=256)
     model_revision: str | None = Field(default=None, max_length=128)
@@ -63,6 +63,7 @@ class TrainingRequest(StrictModel):
     dataset_id: str = Field(min_length=1, max_length=128)
     base_model: Literal["Qwen/Qwen2.5-0.5B-Instruct"] = "Qwen/Qwen2.5-0.5B-Instruct"
     base_revision: str = Field(pattern=r"^[a-f0-9]{40}$")
+    output_model_id: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
     epochs: int = Field(default=1, ge=1, le=10)
     learning_rate: float = Field(default=0.0002, gt=0, le=0.01)
     max_length: int = Field(default=1024, ge=128, le=4096)
@@ -71,6 +72,5 @@ class TrainingRequest(StrictModel):
 
 
 class PromotionRequest(StrictModel):
-    model_id: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
     deployment_name: str = Field(pattern=r"^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$")
     max_model_len: int = Field(default=1024, ge=128, le=4096)

@@ -10,8 +10,9 @@ import re
 import sqlite3
 import threading
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from .data_models import CaptureEvent, DatasetRequest, ReviewRequest
 
@@ -73,7 +74,7 @@ class ArtifactStore:
 
 
 class DataStore:
-    def __init__(self, path: str, artifacts: ArtifactStore):
+    def __init__(self, path: str, artifacts: ArtifactStore, retention_days: int = 30):
         if path != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(path, check_same_thread=False)
@@ -83,9 +84,20 @@ class DataStore:
         self.db.commit()
         self.lock = threading.RLock()
         self.artifacts = artifacts
+        if not 1 <= retention_days <= 365:
+            raise ValueError("Event retention must be between 1 and 365 days")
+        self.retention_days = retention_days
+
+    def purge_events(self) -> int:
+        cutoff = (datetime.now(UTC) - timedelta(days=self.retention_days)).isoformat()
+        with self.lock, self.db:
+            cursor = self.db.execute("DELETE FROM records WHERE kind='event' AND json_extract(body, '$.received_at') < ?", (cutoff,))
+            return cursor.rowcount
 
     def get(self, kind: str, identifier: str) -> dict:
         with self.lock:
+            if kind == "event":
+                self.purge_events()
             row = self.db.execute("SELECT body FROM records WHERE kind=? AND id=?", (kind, identifier)).fetchone()
             if not row:
                 raise DataError(404, f"{kind} was not found")
@@ -97,6 +109,8 @@ class DataStore:
 
     def list(self, kind: str, limit: int = 100, offset: int = 0) -> list[dict]:
         with self.lock:
+            if kind == "event":
+                self.purge_events()
             rows = self.db.execute("SELECT body FROM records WHERE kind=? ORDER BY rowid DESC LIMIT ? OFFSET ?", (kind, limit, offset)).fetchall()
             return [json.loads(row[0]) for row in rows]
 
@@ -146,8 +160,8 @@ class DataStore:
                     messages[-1]["content"] = event["review"]["corrected_response"]
                 rows.append((event, messages, digest(canonical(messages))))
 
-            # Connect conversations sharing identical examples before assigning splits.
-            # This prevents both conversation leakage and duplicate-content leakage.
+            # Connect conversations sharing prompts before assigning splits, even
+            # when their reviewed responses differ. Deduplicate complete transcripts.
             parents = {event["conversation_id"]: event["conversation_id"] for event in events}
 
             def group(key):
@@ -156,16 +170,17 @@ class DataStore:
                     key = parents[key]
                 return key
 
-            owners = {}
-            for event, _, content_hash in rows:
+            owners: dict[str, str] = {}
+            for event, messages, _ in rows:
                 conversation = event["conversation_id"]
-                if content_hash in owners:
-                    left, right = sorted((group(conversation), group(owners[content_hash])))
+                prompt_hash = digest(canonical(messages[:-1]))
+                if prompt_hash in owners:
+                    left, right = sorted((group(conversation), group(owners[prompt_hash])))
                     parents[right] = left
                 else:
-                    owners[content_hash] = conversation
+                    owners[prompt_hash] = conversation
 
-            splits = {"train": [], "validation": [], "test": []}
+            splits: dict[str, list[dict]] = {"train": [], "validation": [], "test": []}
             provenance, seen = [], set()
             for event, messages, content_hash in rows:
                 group_id = group(event["conversation_id"])
@@ -177,7 +192,7 @@ class DataStore:
                     seen.add(content_hash)
 
             identifier = str(uuid.uuid4())
-            manifest = {"id": identifier, "name": request.name, "created_at": datetime.now(UTC).isoformat(), "configuration": request.model_dump(), "format": "chat-jsonl-v1", "files": {}, "provenance": provenance}
+            manifest: dict[str, Any] = {"id": identifier, "name": request.name, "created_at": datetime.now(UTC).isoformat(), "configuration": request.model_dump(), "format": "chat-jsonl-v1", "files": {}, "provenance": provenance}
             for split, examples in splits.items():
                 body = b"".join(canonical(example) + b"\n" for example in examples)
                 key = f"datasets/{identifier}/{split}.jsonl"

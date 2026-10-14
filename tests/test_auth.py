@@ -43,6 +43,12 @@ def test_expired_session_is_rejected(auth_client):
     assert auth_client.get("/api/v1/models").status_code == 401
 
 
+def test_password_rotation_revokes_existing_sessions(auth_client, monkeypatch):
+    sign_in(auth_client)
+    monkeypatch.setenv("CONTROL_PLANE_ADMIN_PASSWORD_HASH", authentication.PASSWORD_HASHER.hash("a-new-test-password"))
+    assert auth_client.get("/auth/session").status_code == 401
+
+
 def test_login_rotates_previous_session(auth_client):
     sign_in(auth_client)
     first_cookie = auth_client.cookies.get(authentication.COOKIE_NAME)

@@ -32,14 +32,29 @@ def sanitize_deployment_name(model_id: str) -> str:
     return clean
 
 
+GPU_HARDWARE_CATALOG: dict[str, float] = {
+    "H100": 80.0,
+    "NVIDIA-H100": 80.0,
+    "A100": 80.0,
+    "NVIDIA-A100": 80.0,
+    "A100-40GB": 40.0,
+    "L40S": 48.0,
+    "A10G": 24.0,
+    "L4": 24.0,
+    "T4": 16.0,
+    "V100": 32.0,
+}
+
+
 class DeployRequest(BaseModel):
     model_id: str = Field(min_length=1, max_length=256, pattern=r"^\S+$")
+    model_revision: str | None = Field(default=None, pattern=r"^[a-f0-9]{40}$")
     deployment_name: str | None = None
     profile: Literal["low-latency", "high-throughput", "balanced"] = "balanced"
     dtype: Literal["auto", "bfloat16", "float16", "bf16", "fp16"] = "auto"
     quantization: Literal["fp8", "awq", "gptq"] | None = None
-    max_model_len: int = Field(default=32768, gt=0)
-    gpu_memory_utilization: float = Field(default=0.90, gt=0, le=1)
+    max_model_len: int = Field(default=32768, ge=512, le=131072)
+    gpu_memory_utilization: float = Field(default=0.90, ge=0.5, le=0.98)
     target_concurrency: int = Field(default=16, gt=0)
 
     @field_validator("deployment_name")
@@ -51,7 +66,7 @@ class DeployRequest(BaseModel):
 
 class GpuPool(BaseModel):
     gpu_sku: str = "NVIDIA-H100-80GB"
-    vram_gb: float = 80.0
+    vram_gb: float | None = 80.0
     total_count: int = 8
     available_count: int = 8
     rdma_supported: bool = True
@@ -75,10 +90,15 @@ class SLAPlanner:
             inventory = ClusterInventory(**inventory)
 
         # 1. Inspect Model (strictly fails if model not found)
-        specs = self.inspector.inspect(request.model_id)
+        specs = self.inspector.inspect(request.model_id, revision=request.model_revision) if request.model_revision else self.inspector.inspect(request.model_id)
 
         # 2. Select primary GPU pool and determine available capacity
-        primary_pool = max(inventory.gpu_pools, key=lambda pool: pool.available_count * pool.vram_gb) if inventory.gpu_pools else GpuPool(available_count=0)
+        for pool in inventory.gpu_pools:
+            if pool.vram_gb is None or pool.vram_gb <= 0:
+                matched = next((vram for key, vram in GPU_HARDWARE_CATALOG.items() if key.lower() in pool.gpu_sku.lower()), 80.0)
+                pool.vram_gb = matched
+
+        primary_pool = max(inventory.gpu_pools, key=lambda pool: pool.available_count * (pool.vram_gb or 80.0)) if inventory.gpu_pools else GpuPool(available_count=0)
         # Workers are pinned to this GPU SKU; other pools cannot satisfy that selector.
         total_available_gpus = primary_pool.available_count
 
@@ -145,6 +165,8 @@ class SLAPlanner:
                 "engine": "nixl" if use_rdma else "default",
             },
         }
+        if request.model_revision:
+            plan["model_revision"] = request.model_revision
 
         if can_disaggregate:
             # Check if decode TP can be safely reduced without OOM
@@ -158,7 +180,7 @@ class SLAPlanner:
                     quantization=chosen_quant,
                     dtype=native_dtype,
                     context_len=request.max_model_len,
-                    concurrency=8,
+                    concurrency=max(request.target_concurrency, 16),
                     gpu_memory_utilization=request.gpu_memory_utilization,
                 ):
                     decode_tp = candidate_decode_tp

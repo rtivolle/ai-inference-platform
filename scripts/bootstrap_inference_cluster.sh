@@ -49,7 +49,7 @@ EOF
 
     # Prepare model cache storage
     mkdir -p "${CACHE_DIR}"
-    chmod 0777 "${CACHE_DIR}"
+    chmod 0775 "${CACHE_DIR}"
     log "NVMe model cache directory initialized at ${CACHE_DIR}"
 }
 
@@ -68,6 +68,7 @@ install_k3s() {
         cp /etc/rancher/k3s/k3s.yaml /root/.kube/config
         chmod 600 /root/.kube/config
     fi
+    export KUBECONFIG="/etc/rancher/k3s/k3s.yaml"
     log "K3s node is active and ready."
 }
 
@@ -80,8 +81,8 @@ install_helm_if_missing() {
 
 deploy_storage_and_crds() {
     log "Applying NVMe local StorageClass and directory structure..."
-    if [[ -f "infra/storage-nvme/nvme-storageclass.yaml" ]]; then
-        kubectl apply -f infra/storage-nvme/nvme-storageclass.yaml || true
+    if [[ -f "${REPO_ROOT}/infra/storage-nvme/nvme-storageclass.yaml" ]]; then
+        kubectl apply -f "${REPO_ROOT}/infra/storage-nvme/nvme-storageclass.yaml"
     fi
 }
 
@@ -96,17 +97,17 @@ deploy_gpu_and_network_operators() {
 
     # GPU Operator
     kubectl create namespace "${GPU_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
-    if [[ -f "infra/gpu-operator/gpu-operator-values.yaml" ]]; then
+    if [[ -f "${REPO_ROOT}/infra/gpu-operator/gpu-operator-values.yaml" ]]; then
         helm upgrade --install gpu-operator nvidia/gpu-operator \
             -n "${GPU_NAMESPACE}" \
-            -f infra/gpu-operator/gpu-operator-values.yaml \
-            --wait=false || true
+            -f "${REPO_ROOT}/infra/gpu-operator/gpu-operator-values.yaml" \
+            --wait=false
     fi
 
     # RDMA Network Operator
     kubectl create namespace "${NETWORK_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
-    if [[ -f "infra/network-rdma/rdma-network-operator.yaml" ]]; then
-        kubectl apply -f infra/network-rdma/rdma-network-operator.yaml || true
+    if [[ -f "${REPO_ROOT}/infra/network-rdma/rdma-network-operator.yaml" ]]; then
+        kubectl apply -f "${REPO_ROOT}/infra/network-rdma/rdma-network-operator.yaml"
     fi
 }
 
@@ -114,24 +115,24 @@ deploy_ingress_and_cloudflare() {
     log "Deploying Ingress-NGINX (ClusterIP only, no public host ports)..."
     kubectl create namespace "${INGRESS_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
 
-    if [[ -f "infra/cloudflare/ingress-nginx-values.yaml" ]]; then
+    if [[ -f "${REPO_ROOT}/infra/cloudflare/ingress-nginx-values.yaml" ]]; then
         helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
             -n "${INGRESS_NAMESPACE}" \
-            -f infra/cloudflare/ingress-nginx-values.yaml \
-            --wait=false || true
+            -f "${REPO_ROOT}/infra/cloudflare/ingress-nginx-values.yaml" \
+            --wait=false
     fi
 
     log "Deploying Cloudflare Tunnel (cloudflared in 2 replicas) and ExternalDNS..."
     kubectl create namespace "${CLOUDFLARE_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
 
-    if [[ -f "infra/cloudflare/cloudflare-secret.yaml" ]]; then
-        kubectl apply -f infra/cloudflare/cloudflare-secret.yaml || true
+    if [[ -f "${REPO_ROOT}/infra/cloudflare/cloudflare-secret.yaml" ]]; then
+        kubectl apply -f "${REPO_ROOT}/infra/cloudflare/cloudflare-secret.yaml"
     fi
-    if [[ -f "infra/cloudflare/cloudflared-deployment.yaml" ]]; then
-        kubectl apply -f infra/cloudflare/cloudflared-deployment.yaml || true
+    if [[ -f "${REPO_ROOT}/infra/cloudflare/cloudflared-deployment.yaml" ]]; then
+        kubectl apply -f "${REPO_ROOT}/infra/cloudflare/cloudflared-deployment.yaml"
     fi
-    if [[ -f "infra/cloudflare/external-dns.yaml" ]]; then
-        kubectl apply -f infra/cloudflare/external-dns.yaml || true
+    if [[ -f "${REPO_ROOT}/infra/cloudflare/external-dns.yaml" ]]; then
+        kubectl apply -f "${REPO_ROOT}/infra/cloudflare/external-dns.yaml"
     fi
 }
 

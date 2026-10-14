@@ -1,0 +1,300 @@
+{
+  "$defs": {
+    "CaptureEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "request_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "conversation_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Conversation Id",
+          "type": "string"
+        },
+        "model": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Model",
+          "type": "string"
+        },
+        "model_revision": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Revision"
+        },
+        "occurred_at": {
+          "format": "date-time",
+          "title": "Occurred At",
+          "type": "string"
+        },
+        "outcome": {
+          "enum": [
+            "success",
+            "failure",
+            "incomplete"
+          ],
+          "title": "Outcome",
+          "type": "string"
+        },
+        "latency_ms": {
+          "maximum": 86400000,
+          "minimum": 0,
+          "title": "Latency Ms",
+          "type": "number"
+        },
+        "input_tokens": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Input Tokens",
+          "type": "integer"
+        },
+        "output_tokens": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Output Tokens",
+          "type": "integer"
+        },
+        "consent": {
+          "default": false,
+          "title": "Consent",
+          "type": "boolean"
+        },
+        "messages": {
+          "items": {
+            "$ref": "#/$defs/Message"
+          },
+          "maxItems": 64,
+          "title": "Messages",
+          "type": "array"
+        }
+      },
+      "required": [
+        "request_id",
+        "conversation_id",
+        "model",
+        "occurred_at",
+        "outcome",
+        "latency_ms"
+      ],
+      "title": "CaptureEvent",
+      "type": "object"
+    },
+    "DatasetRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "event_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 10000,
+          "minItems": 1,
+          "title": "Event Ids",
+          "type": "array"
+        },
+        "seed": {
+          "default": "v1",
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Seed",
+          "type": "string"
+        },
+        "validation_fraction": {
+          "default": 0.1,
+          "exclusiveMaximum": 0.5,
+          "exclusiveMinimum": 0,
+          "title": "Validation Fraction",
+          "type": "number"
+        },
+        "test_fraction": {
+          "default": 0.1,
+          "exclusiveMaximum": 0.5,
+          "exclusiveMinimum": 0,
+          "title": "Test Fraction",
+          "type": "number"
+        }
+      },
+      "required": [
+        "name",
+        "event_ids"
+      ],
+      "title": "DatasetRequest",
+      "type": "object"
+    },
+    "Message": {
+      "additionalProperties": false,
+      "properties": {
+        "role": {
+          "enum": [
+            "system",
+            "user",
+            "assistant"
+          ],
+          "title": "Role",
+          "type": "string"
+        },
+        "content": {
+          "maxLength": 16384,
+          "minLength": 1,
+          "title": "Content",
+          "type": "string"
+        }
+      },
+      "required": [
+        "role",
+        "content"
+      ],
+      "title": "Message",
+      "type": "object"
+    },
+    "PromotionRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "deployment_name": {
+          "pattern": "^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$",
+          "title": "Deployment Name",
+          "type": "string"
+        },
+        "max_model_len": {
+          "default": 1024,
+          "maximum": 4096,
+          "minimum": 128,
+          "title": "Max Model Len",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "deployment_name"
+      ],
+      "title": "PromotionRequest",
+      "type": "object"
+    },
+    "ReviewRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "enum": [
+            "approved",
+            "rejected"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "corrected_response": {
+          "anyOf": [
+            {
+              "maxLength": 16384,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Corrected Response"
+        },
+        "note": {
+          "default": "",
+          "maxLength": 2000,
+          "title": "Note",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "ReviewRequest",
+      "type": "object"
+    },
+    "TrainingRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "dataset_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Dataset Id",
+          "type": "string"
+        },
+        "base_model": {
+          "const": "Qwen/Qwen2.5-0.5B-Instruct",
+          "default": "Qwen/Qwen2.5-0.5B-Instruct",
+          "title": "Base Model",
+          "type": "string"
+        },
+        "base_revision": {
+          "pattern": "^[a-f0-9]{40}$",
+          "title": "Base Revision",
+          "type": "string"
+        },
+        "output_model_id": {
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+          "title": "Output Model Id",
+          "type": "string"
+        },
+        "epochs": {
+          "default": 1,
+          "maximum": 10,
+          "minimum": 1,
+          "title": "Epochs",
+          "type": "integer"
+        },
+        "learning_rate": {
+          "default": 0.0002,
+          "exclusiveMinimum": 0,
+          "maximum": 0.01,
+          "title": "Learning Rate",
+          "type": "number"
+        },
+        "max_length": {
+          "default": 1024,
+          "maximum": 4096,
+          "minimum": 128,
+          "title": "Max Length",
+          "type": "integer"
+        },
+        "lora_rank": {
+          "default": 16,
+          "maximum": 64,
+          "minimum": 4,
+          "title": "Lora Rank",
+          "type": "integer"
+        },
+        "seed": {
+          "default": 42,
+          "maximum": 2147483647,
+          "minimum": 0,
+          "title": "Seed",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "dataset_id",
+        "base_revision",
+        "output_model_id"
+      ],
+      "title": "TrainingRequest",
+      "type": "object"
+    }
+  },
+  "title": "Inference data and training requests",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

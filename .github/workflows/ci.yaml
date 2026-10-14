@@ -26,11 +26,11 @@ jobs:
 
       - name: Run Ruff Lint Check
         run: |
-          ruff check control-plane/ loader/ tests/ scripts/deploy_clusters.py scripts/install_litellm.py scripts/validate_manifests.py
+          ruff check control-plane/ loader/ tests/ gateway/data_capture.py training/ scripts/deploy_clusters.py scripts/install_litellm.py scripts/validate_manifests.py scripts/configure_data_workflow.py scripts/export_data_contracts.py
 
       - name: Run Mypy Type Check
         run: |
-          mypy --ignore-missing-imports control-plane/ loader/ scripts/deploy_clusters.py scripts/install_litellm.py scripts/validate_manifests.py
+          mypy --ignore-missing-imports control-plane/ loader/ scripts/deploy_clusters.py scripts/install_litellm.py scripts/validate_manifests.py scripts/configure_data_workflow.py scripts/export_data_contracts.py
 
   contracts-and-scripts:
     name: Shellcheck & Contracts Validation
@@ -66,7 +66,7 @@ jobs:
 
       - name: Validate JSON schemas
         run: |
-          python -c "import jsonschema, json; [jsonschema.Draft202012Validator.check_schema(json.load(open(f))) for f in ['contracts/model_spec.schema.json', 'contracts/dynamo_crd.schema.json']]"
+          python -c "import jsonschema, json; [jsonschema.Draft202012Validator.check_schema(json.load(open(f))) for f in ['contracts/model_spec.schema.json', 'contracts/dynamo_crd.schema.json', 'contracts/data_workflow.schema.json']]"
 
   unit-and-e2e-tests:
     name: Pytest Unit & E2E Validation
@@ -101,3 +101,9 @@ jobs:
       - name: Build Loader Docker image
         run: |
           docker build -t ai-inference-loader:test -f loader/Dockerfile loader/
+
+      - name: Build Trainer Docker image
+        run: docker build --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu -t ai-inference-trainer:test -f training/Dockerfile .
+
+      - name: Validate trainer integration without GPU or network
+        run: docker run --rm --network none --entrypoint python ai-inference-trainer:test /app/smoke_test.py

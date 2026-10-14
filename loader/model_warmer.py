@@ -15,7 +15,7 @@ logging.basicConfig(level=logging.INFO, format="[%(asctime)s] [%(levelname)s] [M
 logger = logging.getLogger("model_warmer")
 
 
-def warm_model(model_id: str, cache_dir: str, token: str | None = None) -> str:
+def warm_model(model_id: str, cache_dir: str, token: str | None = None, revision: str | None = None, safe: bool = False) -> str:
     logger.info(f"Initiating NVMe pre-caching for model: {model_id}")
     logger.info(f"Target cache directory: {cache_dir}")
 
@@ -24,12 +24,17 @@ def warm_model(model_id: str, cache_dir: str, token: str | None = None) -> str:
     # Enable high-speed hf_transfer if installed
     os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
+    is_safe = safe or ("--safe" in sys.argv)
+    repo_name = model_id.replace("/", "--")
+    local_path = os.path.join(cache_dir, "hub", f"models--{repo_name}", "snapshots", revision) if revision else os.path.join(cache_dir, "hub", f"models--{repo_name}")
+
     try:
         download_path = snapshot_download(
             repo_id=model_id,
-            local_dir=os.path.join(cache_dir, model_id.replace("/", "--")),
+            local_dir=local_path,
+            revision=revision,
             token=token or os.environ.get("HF_TOKEN"),
-            ignore_patterns=["*.pt", "*.bin", "*.msgpack"] if "--safe" in sys.argv else None,
+            ignore_patterns=["*.pt", "*.bin", "*.msgpack"] if is_safe else None,
             max_workers=16,
         )
         logger.info(f"Model {model_id} successfully cached at: {download_path}")
@@ -49,13 +54,15 @@ def main():
         help="Target NVMe directory",
     )
     parser.add_argument("--token", type=str, default=os.environ.get("HF_TOKEN"), help="Hugging Face API token")
+    parser.add_argument("--revision", type=str, default=None, help="Immutable Hugging Face commit")
+    parser.add_argument("--safe", action="store_true", help="Download only safetensors weights")
 
     args = parser.parse_args()
     if not args.model_id:
         logger.error("No model_id specified. Use --model-id or set MODEL_ID environment variable.")
         sys.exit(1)
 
-    warm_model(args.model_id, args.cache_dir, args.token)
+    warm_model(args.model_id, args.cache_dir, args.token, args.revision, safe=args.safe)
 
 
 if __name__ == "__main__":

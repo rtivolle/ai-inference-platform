@@ -25,7 +25,13 @@ def data_store() -> DataStore:
     if not path:
         raise HTTPException(503, "DATA_DB_PATH must point to persistent storage")
     artifacts = ArtifactStore(os.getenv("DATA_ARTIFACT_ROOT", "/var/lib/inference-data/artifacts"), os.getenv("DATA_S3_BUCKET", ""), os.getenv("DATA_S3_ENDPOINT") or None)
-    return DataStore(path, artifacts)
+    try:
+        retention_days = int(os.getenv("DATA_EVENT_RETENTION_DAYS", "30"))
+        if not 1 <= retention_days <= 365:
+            raise ValueError
+    except ValueError as error:
+        raise HTTPException(503, "DATA_EVENT_RETENTION_DAYS must be an integer between 1 and 365") from error
+    return DataStore(path, artifacts, retention_days)
 
 
 async def verify_capture(credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(security_bearer)] = None):
@@ -36,6 +42,12 @@ async def verify_capture(credentials: Annotated[HTTPAuthorizationCredentials | N
 
 @router.post("/events", dependencies=[Depends(verify_capture)], status_code=202)
 async def capture_event(event: CaptureEvent, store: Annotated[DataStore, Depends(data_store)]):
+    return await run_in_threadpool(store.capture, event)
+
+
+@router.post("/examples", dependencies=[Depends(verify_auth)], status_code=201)
+async def import_example(event: CaptureEvent, store: Annotated[DataStore, Depends(data_store)]):
+    """Import a consented text example; it still requires a separate review."""
     return await run_in_threadpool(store.capture, event)
 
 

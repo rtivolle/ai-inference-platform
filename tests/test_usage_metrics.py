@@ -65,6 +65,9 @@ async def test_drain_requires_a_fresh_model_scoped_sample():
     metrics.transport = httpx.MockTransport(lambda request: httpx.Response(200, json={"status": "success", "data": {"result": []}}))
     with pytest.raises(MetricsUnavailableError):
         await metrics.running_requests("org/model")
+    metrics.transport = httpx.MockTransport(lambda request: httpx.Response(200, json={"status": "success", "warnings": ["partial response"], "data": {"result": [{"value": [time.time(), "0"]}]}}))
+    with pytest.raises(MetricsUnavailableError, match="partial"):
+        await metrics.running_requests("org/model")
 
 
 def test_metrics_endpoint_requires_auth_and_valid_windows(api_client):

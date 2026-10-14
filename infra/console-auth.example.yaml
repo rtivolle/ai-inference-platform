@@ -1,0 +1,11 @@
+# Populate through your secret manager. An empty hash leaves sign-in disabled.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: inference-console-auth
+  namespace: dynamo-control-plane
+type: Opaque
+stringData:
+  CONTROL_PLANE_ADMIN_USERNAME: "admin"
+  CONTROL_PLANE_ADMIN_PASSWORD_HASH: ""
+  PROMETHEUS_BEARER_TOKEN: ""

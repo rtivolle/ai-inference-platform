@@ -32,7 +32,7 @@ rules:
     resources: [scaledobjects]
     verbs: [get, list, create, patch, delete]
   - apiGroups: [batch]
-    resources: [jobs]
+    resources: [jobs, jobs/status]
     verbs: [get, create, delete]
   - apiGroups: [discovery.k8s.io]
     resources: [endpointslices]
