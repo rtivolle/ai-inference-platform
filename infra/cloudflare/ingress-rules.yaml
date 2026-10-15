@@ -31,7 +31,7 @@ metadata:
     nginx.ingress.kubernetes.io/ssl-redirect: "false"
 spec:
   rules:
-    - host: "llm.cluster.local"
+    - host: "llm.mila-api.ca"
       http:
         paths:
           - path: /
@@ -41,7 +41,7 @@ spec:
                 name: litellm-service
                 port:
                   number: 4000
-    - host: "control.cluster.local"
+    - host: "control.mila-api.ca"
       http:
         paths:
           - path: /

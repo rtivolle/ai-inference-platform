@@ -1,0 +1,59 @@
+name: Deploy Cloudflare Connector
+
+on:
+  workflow_dispatch:
+    inputs:
+      kube_context:
+        description: Context in the cloudflare-production KUBECONFIG secret
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloudflare-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment: cloudflare-production
+    runs-on: ${{ vars.DEPLOY_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check configuration
+        env:
+          CLUSTER_KUBECONFIG: ${{ secrets.KUBECONFIG }}
+          TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
+          KUBECTL_VERSION: ${{ vars.KUBECTL_VERSION }}
+        run: |
+          test -n "$CLUSTER_KUBECONFIG" || { echo 'Missing KUBECONFIG environment secret'; exit 1; }
+          test -n "$TUNNEL_TOKEN" || { echo 'Missing CLOUDFLARE_TUNNEL_TOKEN environment secret'; exit 1; }
+          test -n "$KUBECTL_VERSION" || { echo 'Missing KUBECTL_VERSION variable'; exit 1; }
+      - uses: azure/setup-kubectl@v4
+        with:
+          version: ${{ vars.KUBECTL_VERSION }}
+      - name: Configure cluster access
+        env:
+          CLUSTER_KUBECONFIG: ${{ secrets.KUBECONFIG }}
+          TARGET_CONTEXT: ${{ inputs.kube_context }}
+        run: |
+          umask 077
+          printf '%s' "$CLUSTER_KUBECONFIG" > "$RUNNER_TEMP/cloudflare.kubeconfig"
+          echo "KUBECONFIG=$RUNNER_TEMP/cloudflare.kubeconfig" >> "$GITHUB_ENV"
+          kubectl --kubeconfig "$RUNNER_TEMP/cloudflare.kubeconfig" config use-context "$TARGET_CONTEXT"
+      - name: Install connector and ingress routes
+        env:
+          TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
+        run: |
+          kubectl -n ingress-nginx get service ingress-nginx-controller
+          kubectl create namespace cloudflare --dry-run=client -o yaml | kubectl apply -f -
+          printf '%s' "$TUNNEL_TOKEN" | kubectl -n cloudflare create secret generic cloudflare-tunnel-credentials \
+            --from-file=tunnel-token=/dev/stdin --dry-run=client -o yaml | kubectl apply -f -
+          kubectl apply -f infra/cloudflare/ingress-rules.yaml
+          kubectl apply -f infra/cloudflare/cloudflared-deployment.yaml
+          kubectl -n cloudflare rollout status deployment/cloudflared --timeout=180s
+      - name: Remove cluster credentials
+        if: always()
+        run: rm -f "$RUNNER_TEMP/cloudflare.kubeconfig"
