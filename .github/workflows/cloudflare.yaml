@@ -20,6 +20,9 @@ jobs:
     environment: cloudflare-production
     runs-on: ${{ vars.DEPLOY_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - name: Check configuration
@@ -53,6 +56,7 @@ jobs:
             --from-file=tunnel-token=/dev/stdin --dry-run=client -o yaml | kubectl apply -f -
           kubectl apply -f infra/cloudflare/ingress-rules.yaml
           kubectl apply -f infra/cloudflare/cloudflared-deployment.yaml
+          kubectl -n cloudflare rollout restart deployment/cloudflared
           kubectl -n cloudflare rollout status deployment/cloudflared --timeout=180s
       - name: Remove cluster credentials
         if: always()

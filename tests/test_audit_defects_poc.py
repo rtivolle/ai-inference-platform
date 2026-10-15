@@ -22,7 +22,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, os.path.abspath("."))
 
-import jinja2
 import jsonschema
 import pydantic
 import pytest
@@ -101,7 +100,6 @@ async def test_poc_d_api_07_litellm_404_blocks_cr_teardown():
     In litellm_sync.py, HTTP 404 on /model/delete is treated as an idempotent success,
     returning True immediately without retrying or raising RuntimeError.
     """
-    import httpx
 
     sync = LiteLLMSync(master_key="sk-test", mock_mode=False, base_url="http://litellm-service:4000")
 
@@ -270,7 +268,7 @@ def test_poc_d_10_loader_cache_layout_mismatch(tmp_path):
         repo_name = model_id.replace("/", "--")
         mock_download.return_value = os.path.join(cache_dir, "hub", f"models--{repo_name}")
 
-        download_path = warm_model(model_id, cache_dir)
+        warm_model(model_id, cache_dir)
         mock_download.assert_called_once()
 
         passed_local_dir = mock_download.call_args.kwargs["local_dir"]

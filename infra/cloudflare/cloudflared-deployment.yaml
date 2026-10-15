@@ -30,6 +30,11 @@ spec:
                 secretKeyRef:
                   name: cloudflare-tunnel-credentials
                   key: tunnel-token
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 2000
+            periodSeconds: 5
           livenessProbe:
             httpGet:
               path: /ready
