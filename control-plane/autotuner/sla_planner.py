@@ -99,6 +99,8 @@ class SLAPlanner:
                 pool.vram_gb = matched
 
         primary_pool = max(inventory.gpu_pools, key=lambda pool: pool.available_count * (pool.vram_gb or 80.0)) if inventory.gpu_pools else GpuPool(available_count=0)
+        # Every pool has a concrete VRAM value after normalization above.
+        assert primary_pool.vram_gb is not None
         # Workers are pinned to this GPU SKU; other pools cannot satisfy that selector.
         total_available_gpus = primary_pool.available_count
 
