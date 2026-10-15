@@ -8,10 +8,15 @@ __pycache__/
 *.pyo
 *.pyd
 
-# Testing & Coverage
+# Testing, Linting & Typecheck Caches
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
 .coverage
 htmlcov/
+
+# Multi-Agent Scratch & Local State
+.agents/
 
 # Logs & Temporary files
 *.log
@@ -20,10 +25,13 @@ htmlcov/
 # Symlinks
 control_plane
 
-# Eggs
+# Packaging
+build/
+dist/
 *.egg-info/
 *.egg
 
 # Local deployment credentials and rendered release manifests
+deploy/clusters.json
 deploy/*.kubeconfig
 release/

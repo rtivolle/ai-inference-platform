@@ -8,19 +8,29 @@ Ce document définit l'architecture organisationnelle, les contrats d'interface,
 
 Historique du dépôt : `2a782cc` (livraison initiale du squelette vagues 1–3) → `8759dd9` (remédiation R1–R4 sur défauts D1–D12) → arbre de travail actuel (ajouts majeurs : pipeline multi-clusters, console web, RBAC runtime). Les vagues 4 et 5 (cluster bare-metal réel & validation E2E non-mockée) n'ont pas encore été exécutées.
 
-### Mise à jour R5 (2026-10-13)
+### Mise à jour R5 & Audit Complet (2026-10-15)
 
-Le checkpoint des ajouts pipeline, passerelle et console web est le commit
-`75c34a2`. Les défauts D3, D13 et D14 sont corrigés dans le code : DGD v1beta1
-et NIXL, cycle KEDA complet, Jobs warmer épinglés par hostname avec attente
-bloquante sur tous les nœuds et placement des workers sur ces mêmes nœuds.
-Le contrat local rejette désormais les anciens champs synthétiques.
+Le checkpoint des ajouts pipeline, passerelle, console web, workflow data/LoRA et
+remédiations d'audit forensique est consolidé dans l'arbre actuel :
+- **Remédiation R5 complétée** : DGD `nvidia.com/v1beta1` et `NixlConnector` (`D3`),
+  cycle KEDA complet (`D13`), Jobs warmer épinglés par hostname avec attente
+  bloquante sur tous les nœuds (`D14`), secrets `gateway/litellm-deployment.yaml`
+  convertis en `secretKeyRef: inference-runtime` (`D15`), et validation `kubeconform v0.7.0`
+  sur les CRDs officiels versionnés (`D11`).
+- **Audit forensique complet (M1–M4)** : 43 défauts analysés dans
+  [`docs/audit-defect-catalog.md`](docs/audit-defect-catalog.md), correctifs
+  Critiques/Hauts appliqués dans l'arbre de travail, **18/18 tests PoC**
+  (`tests/test_audit_defects_poc.py`) et **145/145 tests pytest** passants.
+- **Plan de suivi & intégrations amont (2025–2026)** : voir
+  [`docs/followup-plan.md`](docs/followup-plan.md) pour les actions pré-Vague 4
+  (alignement du chemin de révision épinglée entre `loader/model_warmer.py` et
+  `dynamo/templates/dgd-components.yaml.j2`, RBAC `jobs/status` dans
+  `infra/data-workflow.yaml`), les mises à niveau d'intégrations vérifiées en
+  ligne (`hf_xet`, Run:ai Model Streamer + cache `torch.compile`, LMCache + NIXL,
+  Dynamo SLA Planner / Kubernetes Gateway API Inference Extension, LiteLLM + Redis),
+  et le protocole d'exécution des Vagues 4 et 5.
 
-L'environnement `.venv` utilise Python 3.11.17. La CI ajoute kubeconform v0.7.0
-avec les CRDs officiels versionnés ; 35 ressources statiques et rendues sont
-validées sans erreur ni schéma ignoré. D11 reste partiel : Kind et les tests
-sur cluster/GPU réels des vagues 4–5 restent à exécuter. Les constats historiques
-ci-dessous décrivent l'état avant R5.
+Les constats historiques ci-dessous décrivent l'état initial avant R5.
 
 ### 1. Synthèse Exécutive
 
@@ -74,7 +84,7 @@ spec:
     PrefillWorker: ...
     DecodeWorker: ...
 ```
-Or, selon les spécifications NVIDIA Dynamo v1.5+ ([docs.md](file:///home/rtivolle/ai-inference-platform/docs.md)) :
+Or, selon les spécifications NVIDIA Dynamo v1.5+ ([docs/architecture-audit.md](docs/architecture-audit.md)) :
 * La version de stockage canonique est `nvidia.com/v1beta1`.
 * Le bloc `spec.services` a été remplacé par une liste typée `spec.components` où chaque composant définit un rôle (`frontend`, `prefill`, `decode`), des réplicas, un `providerOverride` Grove et un conteneur `main` exécutant `python3 -m dynamo.vllm`.
 * Le transfert de KV-Cache via RDMA / NIXL s'effectue via l'argument :
