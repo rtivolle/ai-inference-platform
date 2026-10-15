@@ -36,7 +36,7 @@ export DATA_WORKFLOW_ENABLED=1
 export DATA_DB_PATH=/tmp/inference-data/metadata.sqlite3
 export DATA_ARTIFACT_ROOT=/tmp/inference-data/artifacts
 export DATA_CAPTURE_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
-uvicorn api.main:app --app-dir control-plane --host 127.0.0.1 --port 8000
+uvicorn api.main:app --host 127.0.0.1 --port 8000
 ```
 
 The administrator API token is `test-token` in mock mode. Capture uses the

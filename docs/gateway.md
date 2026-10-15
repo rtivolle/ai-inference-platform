@@ -1,7 +1,7 @@
 # LiteLLM Gateway
 
 Full installer guide: `gateway/README.md`. Manifests: `gateway/litellm-deployment.yaml`,
-`gateway/config.yaml`, `gateway/config.example.yaml`. Sync: `control-plane/api/litellm_sync.py`.
+`gateway/config.example.yaml`, `gateway/data_capture.py`. Sync: `control-plane/api/litellm_sync.py`.
 
 ## Install (one cluster)
 
@@ -32,17 +32,24 @@ Bootstrap hook: set `LITELLM_IMAGE` (+ optional `LITELLM_KUBE_CONTEXT`,
 
 - Ready trigger: `<deployment>-frontend` EndpointSlice `ready=true` →
   `POST {LITELLM_PROXY_URL}/model/new` (3 attempts, `2^n` backoff). Deregister:
-  `POST /model/delete {"id": "dgd-<deployment>"}` — deregistration failure
+  `POST /model/delete {"id": "dgd-<deployment>"}` — HTTP `404` is treated as
+  idempotent success (`DEF-API-02`), while any other deregistration failure
   **blocks** Kubernetes deletion.
 - Model payload uses `openai/<hf-id>`, `api_base:
   http://<svc>.dynamo-workloads.svc.cluster.local:8000/v1`, `rpm: 1000`,
-  `timeout: 600`, `model_info.id: dgd-<name>`.
-- All LiteLLM replicas reload DB models every 10 s; deletion drains until
+  `timeout: 600`, `model_info.id: dgd-<name>` (plus `model_info.revision` when
+  a pinned commit is deployed).
+- All LiteLLM replicas reload DB models every 10 s; deletion waits
+  `CONTROL_PLANE_GATEWAY_DRAIN_DELAY_SECONDS` (default 15 s) and drains until
   `num_requests_running == 0` (max 120 s) to avoid 502s.
-- Probes: liveness `/health/liveliness`, readiness `/health/readiness`.
+- Probes: liveness `/health/liveliness`, readiness `/health/readiness`, startup `/health/liveliness`.
+- Optional terminal-event capture callback (`gateway/data_capture.py`) is rendered
+  via `python -m scripts.configure_data_workflow`; see [Data & Fine-Tuning](data-and-fine-tuning.md).
 
-## Multi-cluster note
+## Multi-cluster & HA notes
 
 Each cluster has its own DB + credentials (`deploy/README.md`). The release
-pipeline drops the ephemeral Postgres Deployment/Service and requires a
-persistent `database-url` in `ai-gateway/inference-runtime`.
+pipeline drops the bundled Postgres StatefulSet/Service and requires a
+persistent `database-url` in `ai-gateway/inference-runtime`. For multi-replica
+production deployments, adding Redis (`redis_host`) and
+`allow_requests_on_db_unavailable: true` is recommended (see [Follow-Up Plan](followup-plan.md)).

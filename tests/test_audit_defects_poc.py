@@ -2,9 +2,8 @@
 Defect Remediation Verification Test Suite.
 
 Authoritative Reference:
-- ORIGINAL_REQUEST.md (Requirements R1, R2, R3)
-- DEFECT_CATALOG_AND_REMEDIATION.md (Defect specifications & unified diff remediations)
-- PROJECT.md (Subsystem decomposition and interface contracts)
+- docs/audit-defect-catalog.md (Defect specifications & unified diff remediations)
+- docs/followup-plan.md (Post-audit roadmap & upstream integration plan)
 
 This test module verifies the resolution of the Critical and High severity defects
 identified across all platform subsystems.
